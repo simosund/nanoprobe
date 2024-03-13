@@ -707,6 +707,7 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
     struct nanoping_send_request *request)
 {
     static struct timespec zero_stamp = {0};
+    static struct timespec prev_stamp = {0};
     struct timespec *rxs = &zero_stamp;
     struct nanoping_msg_txs_record txs_rec[TXS_REC_LEN] = {{0}};
     int i = 0;
@@ -743,7 +744,8 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
             pthread_mutex_lock(&ins->rx4tx_lock);
             TAILQ_FOREACH(rec, &ins->rx4tx_head, entries) {
                 if (rec->seq == request->seq) {
-                    rxs = &rec->stamp;
+                    prev_stamp = rec->stamp;
+                    rxs = &prev_stamp;
                     TAILQ_REMOVE(&ins->rx4tx_head, rec, entries);
                     found = true;
                     break;
