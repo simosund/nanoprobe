@@ -36,13 +36,6 @@ struct nanoping_msg {
     struct nanoping_msg_txs_record txs_rec[TXS_REC_LEN];
 } __attribute__((__packed__));
 
-struct ptp_header {
-    uint8_t message_type;
-    uint8_t version_ptp;
-    uint16_t message_length;
-    struct nanoping_msg msg;
-} __attribute__((__packed__));
-
 struct nanoping_rx_record {
     uint64_t seq;
     struct timespec stamp;
@@ -81,7 +74,7 @@ static int get_if_address(int fd, char *ifname, struct in_addr *addr)
     return 0;
 }
 
-static int enable_hw_timestamp(int fd, char *ifname, bool ptpmode)
+static int enable_hw_timestamp(int fd, char *ifname)
 {
     int res;
     struct hwtstamp_config config = {.flags = 0, .tx_type = HWTSTAMP_TX_ON};
@@ -89,11 +82,7 @@ static int enable_hw_timestamp(int fd, char *ifname, bool ptpmode)
     unsigned int opt;
     int enabled = 1;
 
-    if (!ptpmode) {
-        config.rx_filter = HWTSTAMP_FILTER_ALL;
-    } else {
-        config.rx_filter = HWTSTAMP_FILTER_PTP_V2_SYNC;
-    }
+    config.rx_filter = HWTSTAMP_FILTER_ALL;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
     ifr.ifr_addr.sa_family = AF_INET;
@@ -201,23 +190,6 @@ static inline void init_nanoping_msg(struct nanoping_msg *msg, uint64_t seq,
     }
 }
 
-static inline ssize_t send_pkt_ptp(struct nanoping_instance *ins,
-        struct sockaddr_in *remaddr, uint64_t seq, struct timespec *prev_rxs,
-        struct nanoping_msg_txs_record *txs_rec, int txs_rec_len,
-        enum nanoping_msg_type type)
-{
-    char buf[MAX_PAD_BYTES + sizeof(struct ptp_header)] = {0};
-    struct ptp_header *ptp = (struct ptp_header *)&buf;
-    struct iovec iov = {ptp, sizeof(*ptp) + ins->pad_bytes};
-
-    ptp->message_type = 0;
-    ptp->version_ptp = 2;
-    ptp->message_length = htons(sizeof(*ptp) + ins->pad_bytes);
-    init_nanoping_msg(&ptp->msg, seq, type, prev_rxs, txs_rec, txs_rec_len);
-
-    return send_pkt_common(ins, remaddr, &iov, seq);
-}
-
 static inline ssize_t send_pkt_msg(struct nanoping_instance *ins, struct sockaddr_in *remaddr,
         uint64_t seq, struct timespec *prev_rxs,
         struct nanoping_msg_txs_record *txs_rec, int txs_rec_len,
@@ -237,10 +209,7 @@ static ssize_t send_pkt(struct nanoping_instance *ins, struct sockaddr_in *remad
         struct nanoping_msg_txs_record *txs_rec, int txs_rec_len,
         enum nanoping_msg_type type)
 {
-    if (!ins->ptpmode)
-        return send_pkt_msg(ins, remaddr, seq, prev_rxs, txs_rec, txs_rec_len, type);
-    else
-        return send_pkt_ptp(ins, remaddr, seq, prev_rxs, txs_rec, txs_rec_len, type);
+    return send_pkt_msg(ins, remaddr, seq, prev_rxs, txs_rec, txs_rec_len, type);
 }
 
 static int parse_control_msg(struct msghdr *m, struct timespec *stamp,
@@ -365,33 +334,8 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
     return siz;
 }
 
-static ssize_t receive_pkt_ptp(struct nanoping_instance *ins,
-        struct ptp_header *ptp, struct timespec *stamp,
-        struct sockaddr_in *remaddr, enum nanoping_receive_error *err)
-{
-    struct iovec iov = {ptp, sizeof(*ptp)};
-
-    ssize_t siz = receive_pkt_common(ins, &iov, stamp, remaddr, err);
-    if (siz < (ssize_t)sizeof(*ptp))
-	    return siz < 0 ? siz : -ENOMSG;
-
-    if (ptp->msg.seq > 1) {
-        if (ptp->msg.rxs.tv_sec == 0 && ptp->msg.rxs.tv_nsec == 0)
-            *err |= rxerr_rem_rxs_failed;
-        else
-            ins->rem_rxs_collected++;
-    }
-    for (int i = 0; i < ptp->msg.txs_rec_len; i++) {
-        if (ptp->msg.txs_rec[i].seq)
-            ins->rem_txs_collected++;
-    }
-
-    return siz;
-}
-
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-        bool server, bool emulation, bool ptpmode, int timeout, int pad_bytes,
-        int busy_poll)
+        bool server, bool emulation, int timeout, int pad_bytes, int busy_poll)
 {
     struct nanoping_instance *ins =
         (struct nanoping_instance *)calloc(1, sizeof(*ins));
@@ -456,7 +400,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
     }
 
     ins->server = server;
-    if (ptpmode || server) {
+    if (server) {
         if (bind(ins->fd, (struct sockaddr *)&ins->myaddr, sizeof(ins->myaddr)) < 0) {
             perror("bind");
             return NULL;
@@ -471,10 +415,9 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         }
     }else{
         ins->emulation = false;
-        if (enable_hw_timestamp(ins->fd, interface, ptpmode) < 0)
+        if (enable_hw_timestamp(ins->fd, interface) < 0)
             return NULL;
     }
-    ins->ptpmode = ptpmode;
     ins->pad_bytes = pad_bytes;
 
     if (busy_poll) {
@@ -684,42 +627,25 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
     struct nanoping_receive_result *result)
 {
     struct timespec stamp;
+    struct nanoping_msg msg;
     enum nanoping_receive_error err = 0;
     ssize_t siz;
 
     assert(ins && result);
 
-    if (!ins->ptpmode) {
-        struct nanoping_msg msg;
+    siz = receive_pkt_msg(ins, &msg, &stamp, &result->remaddr, &err);
 
-        siz = receive_pkt_msg(ins, &msg, &stamp, &result->remaddr, &err);
-        if (siz < 0)
-            return siz;
+    if (siz < 0)
+        return siz;
 
-        if (msg.type == msg_ping)
-            append_rx_ping_rec(ins, &msg, &stamp, err);
+    if (msg.type == msg_ping)
+        append_rx_ping_rec(ins, &msg, &stamp, err);
 
-        if (msg.type == msg_pong)
-            append_rx_pong_rec(ins, &msg, &stamp, err);
+    if (msg.type == msg_pong)
+        append_rx_pong_rec(ins, &msg, &stamp, err);
 
-        result->seq = msg.seq;
-        result->type = msg.type;
-    }else{
-        struct ptp_header ptp;
-
-        siz = receive_pkt_ptp(ins, &ptp, &stamp, &result->remaddr, &err);
-        if (siz < 0)
-            return siz;
-
-        if (ptp.msg.type == msg_ping)
-            append_rx_ping_rec(ins, &ptp.msg, &stamp, err);
-
-        if (ptp.msg.type == msg_pong)
-            append_rx_pong_rec(ins, &ptp.msg, &stamp, err);
-
-        result->seq = ptp.msg.seq;
-        result->type = ptp.msg.type;
-    }
+    result->seq = msg.seq;
+    result->type = msg.type;
 
     return siz;
 }
@@ -824,33 +750,11 @@ static int send_dummies_msg(struct nanoping_instance *ins, struct sockaddr_in *r
     return send_dummies_common(ins, remaddr, nmsg, iovs);
 }
 
-static int send_dummies_ptp(struct nanoping_instance *ins, struct sockaddr_in *remaddr, int nmsg)
-{
-    struct ptp_header msgs[nmsg];
-    struct iovec iovs[nmsg];
-
-    memset(msgs, 0, sizeof(msgs));
-    memset(iovs, 0, sizeof(iovs));
-    for (int i = 0; i < nmsg; i++) {
-        msgs[i].message_type = 0;
-        msgs[i].version_ptp = 2;
-        msgs[i].message_length = htons(sizeof(struct ptp_header));
-        msgs[i].msg.seq = UINT64_MAX;
-        msgs[i].msg.type = msg_dummy;
-        iovs[i].iov_base = &msgs[i];
-        iovs[i].iov_len = sizeof(struct nanoping_msg);
-    }
-    return send_dummies_common(ins, remaddr, nmsg, iovs);
-}
-
 int nanoping_send_dummies(struct nanoping_instance *ins, struct nanoping_send_dummies_request *request)
 {
     assert(ins && request);
 
-    if (!ins->ptpmode)
-        return send_dummies_msg(ins, &request->remaddr, request->nmsg);
-    else
-        return send_dummies_ptp(ins, &request->remaddr, request->nmsg);
+    return send_dummies_msg(ins, &request->remaddr, request->nmsg);
 }
 
 static int append_txs_rec(struct nanoping_instance *ins, uint64_t seq, struct timespec stamp)

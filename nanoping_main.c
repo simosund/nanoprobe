@@ -28,7 +28,6 @@ static struct option longopts[] = {
     {"port",    required_argument,  NULL,  'p'},
     {"log",     required_argument,  NULL,   'l'},
     {"emulation",   no_argument,    NULL,   'e'},
-    {"ptpmode", no_argument,        NULL,   'P'},
     {"silent",  no_argument,        NULL,   's'},
     {"timeout", required_argument,  NULL,   't'},
     {"busypoll", required_argument, NULL,   'b'},
@@ -48,8 +47,8 @@ static pthread_t signal_thread = 0;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --ptpmode --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --emulation --ptpmode --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
+    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
 static struct {
@@ -651,7 +650,6 @@ int main(int argc, char **argv)
     char *port = "10666";
     char *log = NULL;
     bool emulation = false;
-    bool ptpmode = false;
     bool silent = false;
     bool persistent = false;
     int timeout = 5000000;
@@ -675,7 +673,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:ePst:B:b:Rh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:est:B:b:Rh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -694,9 +692,6 @@ int main(int argc, char **argv)
                 break;
             case 'e':
                 emulation = true;
-                break;
-            case 'P':
-                ptpmode = true;
                 break;
             case 's':
                 silent = true;
@@ -729,8 +724,6 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (ptpmode)
-        port = "319";
     if (mode == mode_client) {
         host = argv[argc - 1];
         if (!interface || !host) {
@@ -746,8 +739,7 @@ int main(int argc, char **argv)
 
     pthread_mutex_init(&stats.lock, NULL);
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, ptpmode, timeout, pad_bytes, busy_poll))
-        == NULL) {
+                             emulation, timeout, pad_bytes, busy_poll)) == NULL) {
         return EXIT_FAILURE;
     }
 
