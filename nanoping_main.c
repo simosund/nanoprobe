@@ -41,38 +41,14 @@ static struct option longopts[] = {
 static atomic_bool signal_initialized = ATOMIC_VAR_INIT(false);
 static atomic_bool signal_handled = ATOMIC_VAR_INIT(false);
 static _Atomic enum nanoping_msg_type state = ATOMIC_VAR_INIT(msg_none);
-static pthread_mutex_t process_lock, signal_lock;
-static pthread_cond_t process_cond, signal_cond;
+static pthread_mutex_t signal_lock;
+static pthread_cond_t signal_cond;
 static pthread_t signal_thread = 0;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
     fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
-}
-
-static struct {
-    unsigned long delta_t_calculated;
-    struct nanoping_timeval min, max, sum;
-    pthread_mutex_t lock;
-} stats = {0};
-
-static void update_statistics(struct nanoping_timeval delta_t)
-{
-    pthread_mutex_lock(&stats.lock);
-    struct nanoping_timeval sum_prev =  stats.sum;
-    if ((stats.min.tv_sec == 0 && stats.min.tv_nsec == 0) ||
-        timevalcmp(&stats.min, &delta_t, >))
-        stats.min = delta_t;
-    if (timevalcmp(&stats.max, &delta_t, <))
-        stats.max = delta_t;
-    timevaladd(&stats.sum, &delta_t, &stats.sum);
-    if (timevalcmp(&stats.sum, &sum_prev, <)) {
-        fprintf(stderr, "Overflow detected on avg calculation!\n");
-        exit(1);
-    }
-    stats.delta_t_calculated++;
-    pthread_mutex_unlock(&stats.lock);
+    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -101,7 +77,6 @@ static void dump_statistics(struct nanoping_instance *ins, struct timespec *dura
     assert(ins);
     assert(duration);
 
-    pthread_mutex_lock(&stats.lock);
     printf("--- nanoping statistics ---\n");
     printf("packet size %zd bytes\n",
             size);
@@ -117,37 +92,11 @@ static void dump_statistics(struct nanoping_instance *ins, struct timespec *dura
     printf("%lu RX stamp collected, %lu TX stamp collected\n",
             ins->rxs_collected,
             ins->txs_collected);
-    printf("RX: found %lu previous RX stamp, found %lu previous TX stamp\n",
-            ins->rx_prev_rxs_found,
-            ins->rx_prev_txs_found);
-    printf("TX: found %lu previous RX stamp, found %lu previous TX stamp\n",
-            ins->tx_prev_rxs_found,
-            ins->tx_prev_txs_found);
-    printf("TX: TX stamp too late %lu\n",
-	    ins->tx_prev_txs_too_late);
-    printf("%lu Remote RX stamp collected, %lu Remote TX stamp collected\n",
-            ins->rem_rxs_collected,
-            ins->rem_txs_collected);
-    if (client) {
-        printf("%lu delta_t calculated\n",
-                stats.delta_t_calculated);
-        printf("swd min/avg/max = ");
-        timevalprint_ns(&stats.min);
-        printf("/");
-        struct nanoping_timeval avg = stats.sum;
-        timevaldiv2(&avg, stats.delta_t_calculated);
-        timevalprint_ns(&avg);
-        printf("/");
-        timevalprint_ns(&stats.max);
-        printf(" ns\n");
-    }
-    pthread_mutex_unlock(&stats.lock);
 }
 
 struct client_task_arg {
     struct nanoping_instance *ins;
     char *host;
-    FILE *log;
     bool silent;
 };
 
@@ -176,11 +125,7 @@ static void *process_client_receive_task(void *arg)
                 fprintf(stderr, "Remote node rejected connection\n");
                 break;
             case msg_pong:
-                if (atomic_load(&state) != msg_ping)
-                    break;
-                pthread_mutex_lock(&process_lock);
-                pthread_cond_signal(&process_cond);
-                pthread_mutex_unlock(&process_lock);
+                /* do nothing */
                 break;
             case msg_fin_ack:
                 atomic_store(&state, msg_fin_ack);
@@ -191,84 +136,6 @@ static void *process_client_receive_task(void *arg)
             default:
                 fprintf(stderr, "unknown message received\n");
         }
-    }
-    return NULL;
-}
-
-static void *process_client_proc_task(void *arg)
-{
-    struct client_task_arg *clarg = (struct client_task_arg *)arg;
-    struct nanoping_instance *ins = clarg->ins;
-    FILE *log = clarg->log;
-    char *host = clarg->host;
-    struct nanoping_process_result process_result = {0};
-    uint64_t prev_seq;
-
-    for (;;) {
-        struct nanoping_timeval t3_t0, t2_t1, sum, delta_t;
-        int res = nanoping_process_one(ins, &process_result);
-        prev_seq = process_result.seq - 1;
-        if (res < 0) {
-            if (process_result.error & rxerr_rxs_failed) {
-                logprintf(log, "%lu,rxs_failed\n", process_result.seq);
-                fprintf(stderr, "rx stamp failed on seq %lu\n",
-                        process_result.seq);
-            }
-            if (process_result.error & rxerr_rem_rxs_failed) {
-                logprintf(log, "%lu,rem_rxs_failed\n", prev_seq);
-                fprintf(stderr, "remote rx stamp failed on seq %lu\n",
-                        prev_seq);
-            }
-            if (process_result.error & rxerr_rem_txs_failed) {
-                logprintf(log, "%lu,rem_txs_failed\n", prev_seq);
-                fprintf(stderr, "remote tx stamp failed on seq %lu\n",
-                        prev_seq);
-            }
-            if (process_result.error & rxerr_rx_dropped) {
-                logprintf(log, "%lu,rx_dropped\n", prev_seq);
-                fprintf(stderr, "rxs record dropped on seq %lu\n",
-                        prev_seq);
-            }
-            if (process_result.error & rxerr_tx_dropped) {
-                logprintf(log, "%lu,tx_dropped\n", prev_seq);
-                fprintf(stderr, "txs record dropped on seq %lu\n",
-            prev_seq);
-            }
-            continue;
-        } else if (res == 0) {
-            pthread_mutex_lock(&process_lock);
-            pthread_cond_wait(&process_cond, &process_lock);
-            pthread_mutex_unlock(&process_lock);
-            continue;
-        }
-
-        if (prev_seq == 0)
-            continue;
-
-        // delta_t = ((t3 - t0) - (t2 - t1)) / 2
-        timevalsub(&process_result.t3, &process_result.t0, &t3_t0);
-        timevalsub(&process_result.t2, &process_result.t1, &t2_t1);
-        timevalsub(&t3_t0, &t2_t1, &sum);
-        delta_t = sum;
-        timevaldiv2(&delta_t, 2);
-
-        if (!clarg->silent) {
-            printf("%s: seq=%lu time=", host, prev_seq);
-            timevalprint_ns(&delta_t);
-            printf("ns\n");
-        }
-        logprintf(log, "%lu,ok,%ld.%09ld,%ld.%09ld,%ld.%09ld,%ld.%09ld,%ld.%09ld,%ld.%09ld,%ld.%09ld,%ld.%09ld,%d\n",
-            prev_seq,
-            process_result.t0.tv_sec, process_result.t0.tv_nsec,
-            process_result.t1.tv_sec, process_result.t1.tv_nsec,
-            process_result.t2.tv_sec, process_result.t2.tv_nsec,
-            process_result.t3.tv_sec, process_result.t3.tv_nsec,
-            t3_t0.tv_sec, t3_t0.tv_nsec,
-            t2_t1.tv_sec, t2_t1.tv_nsec,
-            sum.tv_sec, sum.tv_nsec,
-            delta_t.tv_sec, delta_t.tv_nsec,
-            process_result.num_txs);
-        update_statistics(delta_t);
     }
     return NULL;
 }
@@ -320,18 +187,17 @@ static void *process_txs_task(void *arg)
     return NULL;
 }
 
-static int run_client(struct nanoping_instance *ins, int count, int delay, char *host, char *port, char *logpath, bool silent, int dummy_pkt)
+static int run_client(struct nanoping_instance *ins, int count, int delay, char *host, char *port, bool silent, int dummy_pkt)
 {
     int i;
     struct client_task_arg carg = {0};
     struct nanoping_send_request send_request = {0};
     struct addrinfo *reminfo;
-    pthread_t receive_thread = 0, process_thread = 0, txs_thread = 0;
+    pthread_t receive_thread = 0, txs_thread = 0;
     struct timespec started, finished, duration;
     ssize_t pktsize = 0;
     ssize_t siz;
     int res;
-    FILE *log = NULL;
     sigset_t sigmask;
 
     pthread_mutex_init(&signal_lock, NULL);
@@ -368,9 +234,6 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
         pthread_mutex_unlock(&signal_lock);
     }
 
-    pthread_mutex_init(&process_lock, NULL);
-    pthread_cond_init(&process_cond, NULL);
-
     printf("nanoping %s:%s...\n", host, port);
     if ((res = getaddrinfo(host, port, NULL, &reminfo)) < 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(res));
@@ -382,26 +245,11 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
         return res;
     }
 
-    if (logpath) {
-        if ((log = fopen(logpath, "w")) == NULL) {
-            perror("fopen");
-            return EXIT_FAILURE;
-        }
-    }
-
-    logprintf(log, "seq,stat,t0,t1,t2,t3,t3-t0,t2-t1,sum,delta_t,num_txs\n");
-
     carg.ins = ins;
-    carg.log = log;
     carg.host = host;
     carg.silent = silent;
 
     if (pthread_create(&receive_thread, NULL, process_client_receive_task, &carg) < 0) {
-        perror("pthread_create");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&process_thread, NULL, process_client_proc_task, &carg) < 0) {
         perror("pthread_create");
         return EXIT_FAILURE;
     }
@@ -492,14 +340,6 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
         perror("pthread_join");
         return EXIT_FAILURE;
     }
-    if (pthread_cancel(process_thread)) {
-        perror("pthread_cancel");
-        return EXIT_FAILURE;
-    }
-    if (pthread_join(process_thread, NULL)) {
-        perror("pthread_join");
-        return EXIT_FAILURE;
-    }
     if (pthread_cancel(txs_thread)) {
         perror("pthread_cancel");
         return EXIT_FAILURE;
@@ -509,9 +349,6 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
         return EXIT_FAILURE;
     }
 
-    if (log) {
-        fclose(log);
-    }
     dump_statistics(ins, &duration, true, pktsize);
 
     return EXIT_SUCCESS;
@@ -737,14 +574,13 @@ int main(int argc, char **argv)
         }
      }
 
-    pthread_mutex_init(&stats.lock, NULL);
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, timeout, pad_bytes, busy_poll)) == NULL) {
+                             emulation, timeout, pad_bytes, busy_poll, log)) == NULL) {
         return EXIT_FAILURE;
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, count, delay, host, port, log, silent, dummy_pkt);
+        res = run_client(ins, count, delay, host, port, silent, dummy_pkt);
     } else {
         res = run_server(ins, port, dummy_pkt, persistent);
     }
