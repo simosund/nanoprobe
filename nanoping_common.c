@@ -21,20 +21,14 @@
 #include <linux/errqueue.h>
 #include "nanoping.h"
 
-#define TXS_REC_LEN 6
-
-struct nanoping_msg_txs_record {
-    uint64_t seq;
-    struct nanoping_timeval txs;
-};
-
 struct nanoping_msg {
     uint64_t seq;
     uint8_t type;
-    struct nanoping_timeval rxs;
-    uint8_t txs_rec_len;
-    struct nanoping_msg_txs_record txs_rec[TXS_REC_LEN];
-} __attribute__((__packed__));
+    uint8_t reserved[7];
+};
+
+_Static_assert(sizeof(struct nanoping_msg) == 16,
+               "Unexpected size of struct nanoping_msg - check for padding");
 
 struct nanoping_emul_txs {
     uint64_t seq;

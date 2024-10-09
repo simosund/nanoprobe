@@ -15,11 +15,6 @@ enum timestamp_index {
     TSTAMP_IDX_RECVPONG = 3,
 };
 
-struct nanoping_timeval {
-    int64_t tv_sec;
-    int64_t tv_nsec;
-};
-
 #define logprintf(log, ...) if (log) { fprintf(log, __VA_ARGS__); fflush(log); }
 
 #define timevaladd(tvp, uvp, vvp) \
