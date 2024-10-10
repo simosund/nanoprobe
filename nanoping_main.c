@@ -15,6 +15,13 @@
 #include <errno.h>
 #include "nanoping.h"
 
+enum timer_type {
+    timer_sleep = 0,
+    timer_busy,
+    timer_invalid,
+    timer_n_types = timer_invalid
+};
+
 enum nanoping_mode {
     mode_none = 0,
     mode_server,
@@ -22,20 +29,21 @@ enum nanoping_mode {
 };
 
 static struct option longopts[] = {
-    {"interface", required_argument, NULL, 'i'},
-    {"count",   required_argument,  NULL,  'n'},
-    {"delay",   required_argument,  NULL,  'd'},
-    {"port",    required_argument,  NULL,  'p'},
-    {"log",     required_argument,  NULL,   'l'},
-    {"emulation",   no_argument,    NULL,   'e'},
-    {"silent",  no_argument,        NULL,   's'},
-    {"timeout", required_argument,  NULL,   't'},
-    {"busypoll", required_argument, NULL,   'b'},
-    {"dummy-pkt", required_argument, NULL, 'x'},
-    {"pad-bytes", required_argument, NULL,  'B'},
-    {"persistent", no_argument,     NULL,   'R'},
-    {"help",    no_argument,        NULL,   'h'},
-    {0,         0,                  0,  0}
+    {"interface",  required_argument, NULL, 'i'},
+    {"count",      required_argument, NULL, 'n'},
+    {"delay",      required_argument, NULL, 'd'},
+    {"port",       required_argument, NULL, 'p'},
+    {"log",        required_argument, NULL, 'l'},
+    {"emulation",  no_argument,       NULL, 'e'},
+    {"silent",     no_argument,       NULL, 's'},
+    {"timeout",    required_argument, NULL, 't'},
+    {"busypoll",   required_argument, NULL, 'b'},
+    {"dummy-pkt",  required_argument, NULL, 'x'},
+    {"pad-bytes",  required_argument, NULL, 'B'},
+    {"persistent", no_argument,       NULL, 'R'},
+    {"timer",      required_argument, NULL, 'T'},
+    {"help",       no_argument,       NULL, 'h'},
+    {0,            0,                 0,     0 }
 };
 
 static atomic_bool signal_initialized = ATOMIC_VAR_INIT(false);
@@ -84,6 +92,30 @@ static uint64_t clock_gettime_ns(clockid_t clockid)
         return 0;
 
     return timespec_to_ns(&ts);
+}
+
+static const char *timertype_to_str(enum timer_type ttype)
+{
+    switch (ttype) {
+        case timer_sleep:
+            return "sleep";
+        case timer_busy:
+            return "busy";
+        default:
+            return "invalid";
+    }
+}
+
+static enum timer_type str_to_timertype(const char *str)
+{
+    enum timer_type tt;
+
+    for (tt = 0; tt < timer_n_types; tt++) {
+        if (strcmp(str, timertype_to_str(tt)) == 0)
+            return tt;
+    }
+
+    return timer_invalid;
 }
 
 static void dump_statistics(struct nanoping_instance *ins, struct timespec *duration, bool client, size_t size)
@@ -201,20 +233,30 @@ static void *process_txs_task(void *arg)
     return NULL;
 }
 
-static int wait_until(uint64_t time_ns)
+static int wait_until(uint64_t time_ns, enum timer_type ttype)
 {
     uint64_t now = clock_gettime_ns(CLOCK_MONOTONIC);
 
     if (now > time_ns)
         return 0;
 
-    if (usleep((time_ns - now) / NS_PER_US) < 0)
-        return -errno;
+    switch (ttype) {
+        case timer_sleep:
+            if (usleep((time_ns - now) / NS_PER_US) < 0)
+                return -errno;
+            break;
+        case timer_busy:
+            while (clock_gettime_ns(CLOCK_MONOTONIC) < time_ns);
+            break;
+        default:
+            return -EINVAL;
+    }
 
     return 0;
 }
 
-static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns)
+static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
+                                    enum timer_type ttype)
 {
     uint64_t now, next_interval;
 
@@ -226,10 +268,12 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns)
     next_interval = now - ((now - start_ns) % interval_ns);
     next_interval += interval_ns;
 
-    return wait_until(next_interval);
+    return wait_until(next_interval, ttype);
 }
 
-static int run_client(struct nanoping_instance *ins, int count, int delay, char *host, char *port, bool silent, int dummy_pkt)
+static int run_client(struct nanoping_instance *ins, int count, int delay,
+                      char *host, char *port, bool silent, int dummy_pkt,
+                      enum timer_type ttype)
 {
     int i;
     struct client_task_arg carg = {0};
@@ -355,7 +399,8 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
         }
 
         if (delay > 0) {
-            res = wait_until_next_interval(start_send, delay * NS_PER_US);
+            res = wait_until_next_interval(start_send, delay * NS_PER_US,
+                                           ttype);
             if (res < 0 && res != EINTR) {
                 fprintf(stderr, "Failed waiting until next interval: %s\n",
                         strerror(-res));
@@ -535,6 +580,7 @@ int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
     enum nanoping_mode mode = mode_none;
+    enum timer_type ttype = timer_invalid;
     char *interface = NULL;
     int count = 0;
     int delay = 100;
@@ -565,7 +611,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:est:B:b:Rh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:est:B:b:RT:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -603,6 +649,16 @@ int main(int argc, char **argv)
             case 'R':
                 persistent = true;
                 break;
+            case 'T':
+                ttype = str_to_timertype(optarg);
+                if (ttype == timer_invalid) {
+                    fprintf(stderr, "Unrecognized timer type %s. Available options are:\n",
+                            optarg);
+                    for (ttype = 0; ttype < timer_n_types; ttype++)
+                        fprintf(stderr, "%s\n", timertype_to_str(ttype));
+                    return EXIT_FAILURE;
+                }
+                break;
             case 'h':
             default:
                 usage();
@@ -615,6 +671,10 @@ int main(int argc, char **argv)
                 0, MAX_PAD_BYTES);
         return EXIT_FAILURE;
     }
+
+    // If timer-type not set, automatically set it based on configured delay
+    if (ttype == timer_invalid)
+        ttype = delay < 1000 ? timer_busy : timer_sleep;
 
     if (mode == mode_client) {
         host = argv[argc - 1];
@@ -635,7 +695,7 @@ int main(int argc, char **argv)
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, count, delay, host, port, silent, dummy_pkt);
+        res = run_client(ins, count, delay, host, port, silent, dummy_pkt, ttype);
     } else {
         res = run_server(ins, port, dummy_pkt, persistent);
     }
