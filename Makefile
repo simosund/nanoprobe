@@ -5,7 +5,7 @@ CC=clang
 all: nanoping
 
 OBJS = nanoping_main.o nanoping_common.o
-nanoping: $(OBJS)
+nanoping: $(OBJS) nanoping.h
 	$(CC) -o $@ $(OBJS) $(LDFLAGS)
 
 clean:
