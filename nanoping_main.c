@@ -39,7 +39,6 @@ static struct option longopts[] = {
     {"busypoll",   required_argument, NULL, 'b'},
     {"dummy-pkt",  required_argument, NULL, 'x'},
     {"pad-bytes",  required_argument, NULL, 'B'},
-    {"persistent", no_argument,       NULL, 'R'},
     {"timer",      required_argument, NULL, 'T'},
     {"help",       no_argument,       NULL, 'h'},
     {0,            0,                 0,     0 }
@@ -731,8 +730,7 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
     return EXIT_SUCCESS;
 }
 
-static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
-                      bool persistent)
+static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 {
     struct pthread_thread txs_thread = {0};
     struct pthread_thread *threads[] = {&txs_thread};
@@ -786,7 +784,6 @@ int main(int argc, char **argv)
     char *port = "10666";
     char *log = NULL;
     bool emulation = false;
-    bool persistent = false;
     int timeout = 5000000;
     int busy_poll = 0;
     int dummy_pkt = 0;
@@ -808,7 +805,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:RT:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -839,9 +836,6 @@ int main(int argc, char **argv)
                 break;
             case 'x':
                 dummy_pkt = atoi(optarg);
-                break;
-            case 'R':
-                persistent = true;
                 break;
             case 'T':
                 ttype = str_to_timertype(optarg);
@@ -891,7 +885,7 @@ int main(int argc, char **argv)
     if (mode == mode_client) {
         res = run_client(ins, count, delay, host, port, dummy_pkt, ttype);
     } else {
-        res = run_server(ins, port, dummy_pkt, persistent);
+        res = run_server(ins, port, dummy_pkt);
     }
     nanoping_finish(ins);
     return res;
