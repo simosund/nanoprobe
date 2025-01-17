@@ -96,9 +96,11 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
     const char *log_path);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
-    struct nanoping_receive_result *result);
+			     struct nanoping_receive_result *result,
+			     void *payload_buf, size_t *payload_len);
 ssize_t nanoping_send_one(struct nanoping_instance *ins,
-    struct nanoping_send_request *request);
+			  struct nanoping_send_request *request,
+			  void *payload_buf, size_t payload_len);
 int nanoping_send_dummies(struct nanoping_instance *ins,
     struct nanoping_send_dummies_request *request);
 int nanoping_txs_one(struct nanoping_instance *ins);

@@ -101,7 +101,9 @@ static int enable_hw_timestamp(int fd, char *ifname)
 }
 
 static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
-        struct sockaddr_in *remaddr, struct iovec *iov, uint64_t seq)
+                                      struct sockaddr_in *remaddr,
+                                      struct iovec *iov, size_t iov_len,
+                                      uint64_t seq)
 {
     struct msghdr m = {0};
     ssize_t siz;
@@ -110,7 +112,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
     m.msg_name = remaddr;
     m.msg_namelen = sizeof(*remaddr);
     m.msg_iov = iov;
-    m.msg_iovlen = 1;
+    m.msg_iovlen = iov_len;
 
     errno  = 0;
     if ((siz = sendmsg(ins->fd, &m, 0)) <= 0) {
@@ -148,33 +150,27 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
     return siz;
 }
 
-static inline void init_nanoping_msg(struct nanoping_msg *msg, uint64_t seq,
-                                     enum nanoping_msg_type type)
-{
-    memset(msg, 0, sizeof(*msg));
-
-    msg->seq = seq;
-    msg->type = type;
-}
-
 static inline ssize_t send_pkt_msg(struct nanoping_instance *ins,
                                    struct sockaddr_in *remaddr, uint64_t seq,
-                                   enum nanoping_msg_type type)
+                                   enum nanoping_msg_type type, void *payload,
+                                   size_t payload_len)
 {
-    char buf[MAX_PAD_BYTES + sizeof(struct nanoping_msg)] = {0};
-    struct nanoping_msg *msg = (struct nanoping_msg *)&buf;
-    struct iovec iov = {msg, sizeof(*msg) + ins->pad_bytes};
+    static char buf[MAX_PAD_BYTES] = {0};
+    struct nanoping_msg msg = { .seq = seq, .type = type};
+    struct iovec iov[2];
 
-    init_nanoping_msg(msg, seq, type);
+    iov[0].iov_base = &msg;
+    iov[0].iov_len = sizeof(msg);
 
-    return send_pkt_common(ins, remaddr, &iov, seq);
-}
+    if (payload) {
+        iov[1].iov_base = payload;
+        iov[1].iov_len = payload_len;
+    } else {
+        iov[1].iov_base = buf;
+        iov[1].iov_len = ins->pad_bytes;
+    }
 
-static ssize_t send_pkt(struct nanoping_instance *ins,
-                        struct sockaddr_in *remaddr, uint64_t seq,
-                        enum nanoping_msg_type type)
-{
-    return send_pkt_msg(ins, remaddr, seq, type);
+    return send_pkt_common(ins, remaddr, iov, ARRAY_SIZE(iov), seq);
 }
 
 static int parse_control_msg(struct msghdr *m, struct timespec *stamp,
@@ -227,8 +223,9 @@ static int parse_control_msg(struct msghdr *m, struct timespec *stamp,
 }
 
 static ssize_t receive_pkt_common(struct nanoping_instance *ins,
-        struct iovec *iov, struct timespec *stamp,
-        struct sockaddr_in *remaddr)
+                                  struct iovec *iov, size_t iov_len,
+                                  struct timespec *stamp,
+                                  struct sockaddr_in *remaddr)
 {
     struct msghdr m = {0};
     char ctrlbuf[1024];
@@ -237,9 +234,9 @@ static ssize_t receive_pkt_common(struct nanoping_instance *ins,
     int stamp_found;
 
     m.msg_iov = iov;
-    m.msg_iovlen = 1;
+    m.msg_iovlen = iov_len;
     m.msg_name = remaddr;
-    m.msg_namelen = sizeof(struct sockaddr_in);
+    m.msg_namelen = sizeof(*remaddr);
     m.msg_control = ctrlbuf;
     m.msg_controllen = sizeof(ctrlbuf);
 
@@ -273,14 +270,27 @@ static ssize_t receive_pkt_common(struct nanoping_instance *ins,
 }
 
 static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
-        struct nanoping_msg *msg, struct timespec *stamp,
-        struct sockaddr_in *remaddr)
+			       struct nanoping_msg *msg, struct timespec *stamp,
+			       struct sockaddr_in *remaddr, void *payload_buf,
+                               size_t *payload_len)
 {
-    struct iovec iov = {msg, sizeof(*msg)};
+    struct iovec iov[2];
 
-    ssize_t siz = receive_pkt_common(ins, &iov, stamp, remaddr);
+    iov[0].iov_base = msg;
+    iov[0].iov_len = sizeof(*msg);
+
+    if (payload_buf)  {
+        iov[1].iov_base = payload_buf;
+        iov[1].iov_len = *payload_len;
+    }
+
+    ssize_t siz = receive_pkt_common(ins, iov, payload_buf ? 2 : 1, stamp,
+                                     remaddr);
     if (siz < (ssize_t)sizeof(*msg))
-	    return siz < 0 ? siz : -ENOMSG;
+        return siz < 0 ? siz : -ENOMSG;
+
+    if (payload_buf)
+        *payload_len = siz - sizeof(*msg);
 
     return siz;
 }
@@ -423,24 +433,26 @@ static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
-    struct nanoping_receive_result *result)
+			     struct nanoping_receive_result *result,
+			     void *payload_buf, size_t *payload_len)
 {
     struct timespec stamp;
     struct nanoping_msg msg;
     ssize_t siz;
 
     assert(ins && result);
+    if (payload_buf && !payload_len)
+        return -EINVAL;
 
-    siz = receive_pkt_msg(ins, &msg, &stamp, &result->remaddr);
+    siz = receive_pkt_msg(ins, &msg, &stamp, &result->remaddr, payload_buf,
+                          payload_len);
 
     if (siz < 0)
         return siz;
 
-    if (msg.type == msg_ping)
-        log_pkt_tstamp(ins, msg.seq, &stamp, TSTAMP_IDX_RECVPING);
-
-    if (msg.type == msg_pong)
-        log_pkt_tstamp(ins, msg.seq, &stamp, TSTAMP_IDX_RECVPONG);
+    if (msg.type == msg_ping || msg.type == msg_pong)
+        log_pkt_tstamp(ins, msg.seq, &stamp, msg.type == msg_ping ?
+                       TSTAMP_IDX_RECVPING : TSTAMP_IDX_RECVPONG);
 
     result->seq = msg.seq;
     result->type = msg.type;
@@ -449,12 +461,15 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 }
 
 ssize_t nanoping_send_one(struct nanoping_instance *ins,
-    struct nanoping_send_request *request)
+                          struct nanoping_send_request *request,
+                          void *payload_buf, size_t payload_len)
 {
     ssize_t siz;
 
     assert(ins && request);
-    if ((siz = send_pkt(ins, &request->remaddr, request->seq, request->type)) < 0)
+
+    if ((siz = send_pkt_msg(ins, &request->remaddr, request->seq, request->type,
+                            payload_buf, payload_len)) < 0)
         return siz;
 
     ins->pkt_transmitted++;
@@ -570,7 +585,7 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         return siz;
     }
     if (siz < sizeof(*msg) + ins->pad_bytes) {
-        fprintf(stderr, "Invalid packet size on txs callback\n");
+        // fprintf(stderr, "Invalid packet size on txs callback\n"); - Initial SYN packet might have different size
         return -1;
     }
     headsiz = siz - (sizeof(*msg) + ins->pad_bytes);

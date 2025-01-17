@@ -29,6 +29,13 @@ enum nanoping_mode {
     mode_client
 };
 
+struct nanoping_client_opts {
+	uint32_t count;
+	uint32_t delay;
+	enum timer_type ttype;
+	bool reverse;
+};
+
 static struct option longopts[] = {
     {"interface",  required_argument, NULL, 'i'},
     {"count",      required_argument, NULL, 'n'},
@@ -147,7 +154,7 @@ static void *process_client_receive_task(void *arg)
 
     nanoping_wait_for_receive(ins);
     for (;;) {
-        siz = nanoping_receive_one(ins, &receive_result);
+        siz = nanoping_receive_one(ins, &receive_result, NULL, NULL);
         if (siz < 0)
             exit(EXIT_FAILURE);
 
@@ -379,7 +386,8 @@ static int setup_server_threads(struct nanoping_instance *ins,
 }
 
 static int client_handshake(const struct sockaddr_in *remaddr,
-                            struct nanoping_instance *ins)
+                            struct nanoping_instance *ins,
+                            struct nanoping_client_opts *client_opts)
 {
     struct nanoping_send_request send_request = {0};
     bool first_time = true;
@@ -391,7 +399,8 @@ static int client_handshake(const struct sockaddr_in *remaddr,
 
     atomic_store(&state, msg_syn);
     while (atomic_load(&state) == msg_syn) {
-        if ((err = nanoping_send_one(ins, &send_request) < 0)) {
+        if ((err = nanoping_send_one(ins, &send_request, client_opts,
+                                     sizeof(*client_opts)) < 0)) {
             return err;
         }
 
@@ -423,7 +432,7 @@ static int client_fin(const struct sockaddr_in *remaddr, uint64_t request_num,
 
     atomic_store(&state, msg_fin);
     while (atomic_load(&state) == msg_fin) {
-        if ((err = nanoping_send_one(ins, &send_request)) < 0)
+        if ((err = nanoping_send_one(ins, &send_request, NULL, 0)) < 0)
             return err;
 
         if (first_time) {
@@ -494,7 +503,7 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
     for (i = 1; !atomic_load(&signal_handled); i++) {
         send_request.seq = i;
-        siz = nanoping_send_one(ins, &send_request);
+        siz = nanoping_send_one(ins, &send_request, NULL, 0);
         if (siz < 0)
             return siz;
 
@@ -561,30 +570,36 @@ static void prepare_server_reply(struct nanoping_send_request *send_request,
 }
 
 static int server_handshake(struct nanoping_instance *ins,
-                            struct sockaddr_in *remaddr)
+                            struct sockaddr_in *remaddr,
+                            struct nanoping_client_opts *client_opts)
 {
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
+    size_t opt_len = sizeof(*client_opts);
     char buf[INET6_ADDRSTRLEN] = "";
     int res;
 
     // Wait for SYN
-    while (receive_result.type != msg_syn) {
+    while (true) {
         memset(&receive_result, 0, sizeof(receive_result));
 
         nanoping_wait_for_receive(ins);
-        res = nanoping_receive_one(ins, &receive_result);
+        res = nanoping_receive_one(ins, &receive_result, client_opts, &opt_len);
         if (res < 0)
             return res;
 
         if (receive_result.type != msg_syn)
             fprintf(stderr, "Packet of unexpected type (%d) while waiting for SYN, ignoring\n",
                     receive_result.type);
+        else if (opt_len < sizeof(*client_opts))
+            fprintf(stderr, "Received malformed SYN packet, ignoring\n");
+        else
+            break;
     }
 
     // Send SYN-ACK
     prepare_server_reply(&send_request, &receive_result, msg_syn_ack);
-    res = nanoping_send_one(ins, &send_request);
+    res = nanoping_send_one(ins, &send_request, NULL, 0);
     if (res < 0)
         return res;
 
@@ -592,6 +607,10 @@ static int server_handshake(struct nanoping_instance *ins,
               &receive_result.remaddr.sin_addr, buf, sizeof(buf));
     printf("Connected to client %s:%u\n", buf,
            ntohs(receive_result.remaddr.sin_port));
+
+    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d)\n",
+           client_opts->count, client_opts->delay,
+           timertype_to_str(client_opts->ttype), client_opts->ttype);
 
     atomic_store(&state, msg_pong);
     *remaddr = receive_result.remaddr;
@@ -608,7 +627,7 @@ static int server_handle_foreign_packet(struct nanoping_instance *ins,
 
     if (receive_result->type == msg_syn) {
         prepare_server_reply(&send_request, receive_result, msg_syn_rst);
-        res = nanoping_send_one(ins, &send_request);
+        res = nanoping_send_one(ins, &send_request, NULL, 0);
         if (res < 0)
             return res;
 
@@ -638,13 +657,13 @@ static int server_handle_ping(struct nanoping_instance *ins,
         case msg_syn:
             // SYN-ACK to client must have been lost, resend
             prepare_server_reply(&send_request, receive_result, msg_syn_ack);
-            res = nanoping_send_one(ins, &send_request);
+            res = nanoping_send_one(ins, &send_request, NULL, 0);
             if (res < 0)
                 return res;
             break;
         case msg_fin:
             prepare_server_reply(&send_request, receive_result, msg_fin_ack);
-            res = nanoping_send_one(ins, &send_request);
+            res = nanoping_send_one(ins, &send_request, NULL, 0);
             if (res < 0)
                 return res;
 
@@ -657,7 +676,7 @@ static int server_handle_ping(struct nanoping_instance *ins,
                 break;
             }
             prepare_server_reply(&send_request, receive_result, msg_pong);
-            res = nanoping_send_one(ins, &send_request);
+            res = nanoping_send_one(ins, &send_request, NULL, 0);
             if (res < 0)
                 return res;
             if (pktsize)
@@ -693,7 +712,7 @@ static int server_echoloop(struct nanoping_instance *ins,
     while (atomic_load(&state) == msg_pong) {
         memset(&receive_result, 0, sizeof(receive_result));
 
-        res = nanoping_receive_one(ins, &receive_result);
+        res = nanoping_receive_one(ins, &receive_result, NULL, NULL);
         if (res < 0)
             return res;
 
@@ -712,9 +731,8 @@ static int server_echoloop(struct nanoping_instance *ins,
     return 0;
 }
 
-static int run_client(struct nanoping_instance *ins, int count, int delay,
-                      char *host, char *port, int dummy_pkt,
-                      enum timer_type ttype)
+static int run_client(struct nanoping_instance *ins, char *host, char *port,
+                      int dummy_pkt, struct nanoping_client_opts *client_opts)
 {
     struct addrinfo *reminfo;
     struct pthread_thread signal_thread = {0};
@@ -737,14 +755,14 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
         return EXIT_FAILURE;
     }
 
-    if (count > 0) {
-        alarm(count);
+    if (client_opts->count > 0) {
+        alarm(client_opts->count);
     }
 
     printf("nanoping %s:%s...\n", host, port);
 
-
-    err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins);
+    err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins,
+                           client_opts);
     if (err)
         return EXIT_FAILURE;
 
@@ -754,7 +772,8 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
     }
 
     err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
-				   delay, ttype, dummy_pkt, &pktsize);
+				   client_opts->delay, client_opts->ttype,
+                                   dummy_pkt, &pktsize);
     if (err)
         return EXIT_FAILURE;
 
@@ -775,6 +794,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     struct pthread_thread txs_thread = {0};
     struct pthread_thread *threads[] = {&txs_thread};
     struct timespec started, finished, duration;
+    struct nanoping_client_opts client_opts;
     struct sockaddr_in remaddr;
     ssize_t pktsize = 0;
     int err;
@@ -787,8 +807,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 
     printf("nanoping server started on port %s.\n", port);
 
-
-    err = server_handshake(ins, &remaddr);
+    err = server_handshake(ins, &remaddr, &client_opts);
     if (err)
         return EXIT_FAILURE;
 
@@ -818,11 +837,11 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
+    struct nanoping_client_opts client_opts = {
+        .count = 0, .delay = 100, .ttype = timer_invalid
+    };
     enum nanoping_mode mode = mode_none;
-    enum timer_type ttype = timer_invalid;
     char *interface = NULL;
-    int count = 0;
-    int delay = 100;
     char *host = NULL;
     char *port = "10666";
     char *log = NULL;
@@ -854,10 +873,10 @@ int main(int argc, char **argv)
                 interface = optarg;
                 break;
             case 'n':
-                count = atoi(optarg);
+                client_opts.count = atoi(optarg);
                 break;
             case 'd':
-                delay = atoi(optarg);
+                client_opts.delay = atoi(optarg);
                 break;
             case 'p':
                 port = optarg;
@@ -881,11 +900,11 @@ int main(int argc, char **argv)
                 dummy_pkt = atoi(optarg);
                 break;
             case 'T':
-                ttype = str_to_timertype(optarg);
-                if (ttype == timer_invalid) {
+                client_opts.ttype = str_to_timertype(optarg);
+                if (client_opts.ttype == timer_invalid) {
                     fprintf(stderr, "Unrecognized timer type %s. Available options are:\n",
                             optarg);
-                    for (ttype = 0; ttype < timer_n_types; ttype++)
+                    for (enum timer_type ttype = 0; ttype < timer_n_types; ttype++)
                         fprintf(stderr, "%s\n", timertype_to_str(ttype));
                     return EXIT_FAILURE;
                 }
@@ -904,8 +923,9 @@ int main(int argc, char **argv)
     }
 
     // If timer-type not set, automatically set it based on configured delay
-    if (ttype == timer_invalid)
-        ttype = delay < 1000 ? timer_busy : timer_sleep;
+    if (client_opts.ttype == timer_invalid)
+        client_opts.ttype = client_opts.delay <= 1000 ? timer_busy : timer_sleep;
+
 
     if (mode == mode_client) {
         host = argv[argc - 1];
@@ -926,7 +946,7 @@ int main(int argc, char **argv)
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, count, delay, host, port, dummy_pkt, ttype);
+        res = run_client(ins, host, port, dummy_pkt, &client_opts);
     } else {
         res = run_server(ins, port, dummy_pkt);
     }
