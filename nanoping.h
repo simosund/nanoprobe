@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <netinet/in.h>
 
+#define NS_PER_S 1000000000
+#define NS_PER_US 1000
+
 #define MAX_PAD_BYTES 2048
 
 enum timestamp_index {
