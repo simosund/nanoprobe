@@ -16,6 +16,11 @@
 #include <arpa/inet.h>
 #include "nanoping.h"
 
+// Some limits for acceptable values for server in reverse mode
+#define REVERSE_DEFAULT_COUNT 10
+#define REVERSE_MAX_COUNT 3600 // 1h
+#define REVERSE_MAX_DELAY 1000000 // 1sec
+
 enum timer_type {
     timer_sleep = 0,
     timer_busy,
@@ -48,6 +53,7 @@ static struct option longopts[] = {
     {"dummy-pkt",  required_argument, NULL, 'x'},
     {"pad-bytes",  required_argument, NULL, 'B'},
     {"timer",      required_argument, NULL, 'T'},
+    {"reverse",    no_argument,       NULL, 'R'},
     {"help",       no_argument,       NULL, 'h'},
     {0,            0,                 0,     0 }
 };
@@ -60,7 +66,7 @@ static pthread_cond_t signal_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --reverse [host]\n");
     fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
@@ -414,7 +420,7 @@ static int client_handshake(const struct sockaddr_in *remaddr,
 
     if (atomic_load(&state) != msg_syn_ack)
         return -EBADE;
-    atomic_store(&state, msg_ping);
+    atomic_store(&state, client_opts->reverse ? msg_pong : msg_ping);
 
     return 0;
 }
@@ -569,6 +575,68 @@ static void prepare_server_reply(struct nanoping_send_request *send_request,
     send_request->type = msg_type;
 }
 
+static enum timer_type select_default_timer(int delay_us)
+{
+    return delay_us <= 1000 ? timer_busy : timer_sleep;
+}
+
+static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
+{
+    int err = 0;
+
+    // If client doesn't attempt to use reverse mode, any values acceptable
+    if (!opts->reverse)
+        return 0;
+
+    if (opts->count == 0) {
+        err = -EINVAL;
+        fprintf(stderr, "Warning: Client has not set count (must be non-zero)\n");
+        if (fix) {
+            fprintf(stderr, "Using default %d s\n", REVERSE_DEFAULT_COUNT);
+            opts->count = REVERSE_DEFAULT_COUNT;
+        } else {
+            return err;
+        }
+    } else if (opts->count > REVERSE_MAX_COUNT) {
+        err = -ERANGE;
+        fprintf(stderr, "Warning: Client has set count %u s, must be <= %u s\n",
+                opts->count, REVERSE_MAX_COUNT);
+        if (fix) {
+            fprintf(stderr, "Limiting to %u s\n", REVERSE_MAX_COUNT);
+            opts->count = REVERSE_MAX_COUNT;
+        } else {
+            return err;
+        }
+    }
+
+    if (opts->delay > REVERSE_MAX_DELAY) {
+        err = -ERANGE;
+        fprintf(stderr, "Warning: Client has set delay to %u us, must be <= %u us\n",
+                opts->delay, REVERSE_MAX_DELAY);
+        if (fix) {
+            fprintf(stderr, "Limiting to %u us\n", REVERSE_MAX_DELAY);
+            opts->delay = REVERSE_MAX_DELAY;
+        } else {
+            return err;
+        }
+    }
+
+    if (opts->ttype < 0 || opts->ttype >= timer_invalid) {
+        err = -EINVAL;
+        fprintf(stderr, "Warning: Client set invalid timer type (%d)\n",
+                opts->ttype);
+        if (fix) {
+            opts->ttype = select_default_timer(opts->delay);
+            fprintf(stderr, "Using timer %s (%d) instead\n",
+                    timertype_to_str(opts->ttype), opts->ttype);
+        } else {
+            return err;
+        }
+    }
+
+    return err;
+}
+
 static int server_handshake(struct nanoping_instance *ins,
                             struct sockaddr_in *remaddr,
                             struct nanoping_client_opts *client_opts)
@@ -608,11 +676,13 @@ static int server_handshake(struct nanoping_instance *ins,
     printf("Connected to client %s:%u\n", buf,
            ntohs(receive_result.remaddr.sin_port));
 
-    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d)\n",
+    sanitize_clientopts(client_opts, true);
+    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d), reverse: %s\n",
            client_opts->count, client_opts->delay,
-           timertype_to_str(client_opts->ttype), client_opts->ttype);
+           timertype_to_str(client_opts->ttype), client_opts->ttype,
+           client_opts->reverse ? "true" : "false");
 
-    atomic_store(&state, msg_pong);
+    atomic_store(&state, client_opts->reverse ? msg_ping : msg_pong);
     *remaddr = receive_result.remaddr;
     return 0;
 }
@@ -771,11 +841,21 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
-				   client_opts->delay, client_opts->ttype,
-                                   dummy_pkt, &pktsize);
-    if (err)
+    if (client_opts->reverse) {
+        err = close_threads(threads, ARRAY_SIZE(threads));
+        err = err ?: setup_server_threads(ins, &txs_thread);
+        err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
+                                     dummy_pkt, &pktsize);
+    } else {
+        err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
+                                       client_opts->delay, client_opts->ttype,
+                                       dummy_pkt, &pktsize);
+    }
+    if (err) {
+        fprintf(stderr, "Failed %s pings: %s\n",
+                client_opts->reverse ? "echoing" : "sending", strerror(-err));
         return EXIT_FAILURE;
+    }
 
     if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
         perror("clock_gettime");
@@ -791,8 +871,10 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 
 static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 {
+    struct pthread_thread signal_thread = {0};
     struct pthread_thread txs_thread = {0};
-    struct pthread_thread *threads[] = {&txs_thread};
+    struct pthread_thread receive_thread = {0};
+    struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
     struct timespec started, finished, duration;
     struct nanoping_client_opts client_opts;
     struct sockaddr_in remaddr;
@@ -816,12 +898,25 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
         return EXIT_FAILURE;
     }
 
-
-    err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
-    if (err)
+    if (client_opts.reverse) {
+        err = close_threads(threads, ARRAY_SIZE(threads));
+        err = err ?: setup_client_threads(ins, &signal_thread, &txs_thread,
+                                          &receive_thread);
+        sleep(1); // Give client some time to setup
+        alarm(client_opts.count);
+        err = err ?: run_client_ping_sequence(ins, &remaddr, client_opts.delay,
+                                              client_opts.ttype, dummy_pkt,
+                                              &pktsize);
+    } else {
+        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
+    }
+    if (err) {
+        fprintf(stderr, "Failed %s pings: %s\n",
+                client_opts.reverse ? "sending" : "echoing", strerror(-err));
         return EXIT_FAILURE;
+    }
 
-    // Has received FIN - shutdown
+    // Test finished - shutdown
     if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
         perror("clock_gettime");
         return EXIT_FAILURE;
@@ -838,7 +933,7 @@ int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
     struct nanoping_client_opts client_opts = {
-        .count = 0, .delay = 100, .ttype = timer_invalid
+        .count = 0, .delay = 100, .ttype = timer_invalid, .reverse = false,
     };
     enum nanoping_mode mode = mode_none;
     char *interface = NULL;
@@ -867,7 +962,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:Rh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -909,6 +1004,9 @@ int main(int argc, char **argv)
                     return EXIT_FAILURE;
                 }
                 break;
+            case 'R':
+                client_opts.reverse = true;
+                break;
             case 'h':
             default:
                 usage();
@@ -924,8 +1022,14 @@ int main(int argc, char **argv)
 
     // If timer-type not set, automatically set it based on configured delay
     if (client_opts.ttype == timer_invalid)
-        client_opts.ttype = client_opts.delay <= 1000 ? timer_busy : timer_sleep;
+        client_opts.ttype = select_default_timer(client_opts.delay);
 
+    // Prevent client from starting with invalid client-options
+    res = sanitize_clientopts(&client_opts, false);
+    if (res) {
+        fprintf(stderr, "Invalid client option: %s\n", strerror(-res));
+        return EXIT_FAILURE;
+    }
 
     if (mode == mode_client) {
         host = argv[argc - 1];
