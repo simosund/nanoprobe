@@ -34,11 +34,18 @@ enum nanoping_mode {
     mode_client
 };
 
+enum test_direction {
+    test_forward,
+    test_reverse,
+    test_duplex,
+    test_n_directions,
+};
+
 struct nanoping_client_opts {
-	uint32_t count;
-	uint32_t delay;
-	enum timer_type ttype;
-	bool reverse;
+  uint32_t count;
+  uint32_t delay;
+  enum timer_type ttype;
+  enum test_direction direction;
 };
 
 static struct option longopts[] = {
@@ -54,6 +61,7 @@ static struct option longopts[] = {
     {"pad-bytes",  required_argument, NULL, 'B'},
     {"timer",      required_argument, NULL, 'T'},
     {"reverse",    no_argument,       NULL, 'R'},
+    {"duplex",     no_argument,       NULL, 'D'},
     {"help",       no_argument,       NULL, 'h'},
     {0,            0,                 0,     0 }
 };
@@ -62,11 +70,13 @@ static atomic_bool signal_initialized = ATOMIC_VAR_INIT(false);
 static atomic_bool signal_handled = ATOMIC_VAR_INIT(false);
 static _Atomic enum nanoping_msg_type state = ATOMIC_VAR_INIT(msg_none);
 static pthread_mutex_t signal_lock;
+static pthread_mutex_t ping_wait_lock;
 static pthread_cond_t signal_cond;
+static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --reverse [host]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --reverse/--duplex [host]\n");
     fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
@@ -129,6 +139,20 @@ static enum timer_type str_to_timertype(const char *str)
     return timer_invalid;
 }
 
+static const char *testdirection_to_str(enum test_direction direction)
+{
+    switch (direction) {
+        case test_forward:
+            return "forward";
+        case test_reverse:
+            return "reverse";
+        case test_duplex:
+            return "duplex";
+        default:
+            return "invalid";
+    }
+}
+
 static void dump_statistics(struct nanoping_instance *ins, struct timespec *duration, bool client, size_t size)
 {
     assert(ins);
@@ -175,14 +199,19 @@ static void *process_client_receive_task(void *arg)
                 atomic_store(&state, msg_syn_rst);
                 fprintf(stderr, "Remote node rejected connection\n");
                 break;
+            case msg_ping:
+                if (atomic_load(&state) == msg_ping_wait)
+                    pthread_mutex_lock(&ping_wait_lock);
+                    atomic_store(&state, msg_ping);
+                    pthread_cond_signal(&ping_wait_cond);
+                    pthread_mutex_unlock(&ping_wait_lock);
+                break;
             case msg_pong:
+            case msg_dummy:
                 /* do nothing */
                 break;
             case msg_fin_ack:
                 atomic_store(&state, msg_fin_ack);
-                break;
-            case msg_dummy:
-                /* do nothing */
                 break;
             default:
                 fprintf(stderr, "unknown message received\n");
@@ -420,7 +449,8 @@ static int client_handshake(const struct sockaddr_in *remaddr,
 
     if (atomic_load(&state) != msg_syn_ack)
         return -EBADE;
-    atomic_store(&state, client_opts->reverse ? msg_pong : msg_ping);
+    atomic_store(&state, client_opts->direction == test_reverse ? msg_pong :
+                                                                  msg_ping);
 
     return 0;
 }
@@ -549,7 +579,8 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
                                     int delay, enum timer_type ttype,
-                                    int dummy_pkt, ssize_t *packet_size)
+                                    bool skip_fin_handshake, int dummy_pkt,
+                                    ssize_t *packet_size)
 {
     uint64_t next_seq;
     int res;
@@ -559,9 +590,13 @@ static int run_client_ping_sequence(struct nanoping_instance *ins,
     if (res)
         return res;
 
-    res = client_fin(remaddr, next_seq, ins);
-    if (res)
-        return res;
+    if (skip_fin_handshake) {
+        sleep(1);
+    } else {
+        res = client_fin(remaddr, next_seq, ins);
+        if (res)
+            return res;
+    }
 
     return 0;
 
@@ -584,8 +619,8 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
 {
     int err = 0;
 
-    // If client doesn't attempt to use reverse mode, any values acceptable
-    if (!opts->reverse)
+    // For forward test any value is valid (only affects client)
+    if (opts->direction == test_forward)
         return 0;
 
     if (opts->count == 0) {
@@ -634,6 +669,17 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
         }
     }
 
+    if (opts->direction < 0 || opts->direction >= test_n_directions) {
+        err = -ERANGE;
+        fprintf(stderr, "Warning: Client set invalid test direction (%d)\n",
+                opts->direction);
+        if (fix) {
+            opts->direction = test_forward;
+            fprintf(stderr, "Using direction %s (%d) instead\n",
+                    testdirection_to_str(opts->direction), opts->direction);
+        }
+    }
+
     return err;
 }
 
@@ -677,12 +723,14 @@ static int server_handshake(struct nanoping_instance *ins,
            ntohs(receive_result.remaddr.sin_port));
 
     sanitize_clientopts(client_opts, true);
-    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d), reverse: %s\n",
+    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d), direction: %s (%d)\n",
            client_opts->count, client_opts->delay,
            timertype_to_str(client_opts->ttype), client_opts->ttype,
-           client_opts->reverse ? "true" : "false");
+           testdirection_to_str(client_opts->direction), client_opts->direction);
 
-    atomic_store(&state, client_opts->reverse ? msg_ping : msg_pong);
+    atomic_store(&state, client_opts->direction == test_duplex ? msg_ping_wait :
+                         client_opts->direction == test_reverse ? msg_ping :
+                                                                  msg_pong);
     *remaddr = receive_result.remaddr;
     return 0;
 }
@@ -801,6 +849,18 @@ static int server_echoloop(struct nanoping_instance *ins,
     return 0;
 }
 
+static void wait_for_ping(enum timer_type ttype)
+{
+    if (ttype == timer_busy) {
+        while (atomic_load(&state) == msg_ping_wait);
+    } else {
+        pthread_mutex_lock(&ping_wait_lock);
+        while (atomic_load(&state) == msg_ping_wait)
+            pthread_cond_wait(&ping_wait_cond, &ping_wait_lock);
+        pthread_mutex_unlock(&ping_wait_lock);
+    }
+}
+
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
                       int dummy_pkt, struct nanoping_client_opts *client_opts)
 {
@@ -825,6 +885,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
+    // TODO - move alarm later to not include time of handshake
     if (client_opts->count > 0) {
         alarm(client_opts->count);
     }
@@ -841,19 +902,25 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    if (client_opts->reverse) {
+    if (client_opts->direction == test_reverse) {
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_server_threads(ins, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
                                      dummy_pkt, &pktsize);
     } else {
+        // In duplex mode - give server some time to transition to client mode
+        if (client_opts->direction == test_duplex)
+            sleep(1);
+
         err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
                                        client_opts->delay, client_opts->ttype,
+                                       client_opts->direction == test_duplex,
                                        dummy_pkt, &pktsize);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
-                client_opts->reverse ? "echoing" : "sending", strerror(-err));
+                client_opts->direction == test_reverse ? "echoing" : "sending",
+                strerror(-err));
         return EXIT_FAILURE;
     }
 
@@ -881,6 +948,9 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     ssize_t pktsize = 0;
     int err;
 
+    pthread_cond_init(&ping_wait_cond, NULL);
+    pthread_mutex_init(&ping_wait_lock, NULL);
+
     err = setup_server_threads(ins, &txs_thread);
     if (err) {
         fprintf(stderr, "Failed setting up server threads: %s\n", strerror(-err));
@@ -898,21 +968,31 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
         return EXIT_FAILURE;
     }
 
-    if (client_opts.reverse) {
+    if (client_opts.direction == test_forward) {
+        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
+    } else {
+        // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_client_threads(ins, &signal_thread, &txs_thread,
                                           &receive_thread);
-        sleep(1); // Give client some time to setup
+
+        if (client_opts.direction == test_duplex)
+            // In duplex mode, wait for first ping from client
+            wait_for_ping(client_opts.ttype);
+        else
+            // In reverse mode, give client some time to transiton to server mode
+            sleep(1);
+
         alarm(client_opts.count);
         err = err ?: run_client_ping_sequence(ins, &remaddr, client_opts.delay,
-                                              client_opts.ttype, dummy_pkt,
-                                              &pktsize);
-    } else {
-        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
+                                              client_opts.ttype,
+                                              client_opts.direction == test_duplex,
+                                              dummy_pkt, &pktsize);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
-                client_opts.reverse ? "sending" : "echoing", strerror(-err));
+                client_opts.direction == test_forward ? "echoing" : "sending",
+                strerror(-err));
         return EXIT_FAILURE;
     }
 
@@ -933,7 +1013,10 @@ int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
     struct nanoping_client_opts client_opts = {
-        .count = 0, .delay = 100, .ttype = timer_invalid, .reverse = false,
+        .count = 0,
+        .delay = 100,
+        .ttype = timer_invalid,
+        .direction = test_forward,
     };
     enum nanoping_mode mode = mode_none;
     char *interface = NULL;
@@ -946,6 +1029,7 @@ int main(int argc, char **argv)
     int dummy_pkt = 0;
     int pad_bytes = 0;
     int c, res, nargc = argc;
+    bool reverse = false, duplex = false;
 
     if (argc >= 2) {
         if (!strcmp(argv[1], "--server")) {
@@ -962,7 +1046,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:Rh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:RDh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1005,7 +1089,11 @@ int main(int argc, char **argv)
                 }
                 break;
             case 'R':
-                client_opts.reverse = true;
+                // Don't set client_opts.direction directly to detect if both reverse and duplex are set
+                reverse = true;
+                break;
+            case 'D':
+                duplex = true;
                 break;
             case 'h':
             default:
@@ -1023,6 +1111,17 @@ int main(int argc, char **argv)
     // If timer-type not set, automatically set it based on configured delay
     if (client_opts.ttype == timer_invalid)
         client_opts.ttype = select_default_timer(client_opts.delay);
+
+    if (reverse && duplex) {
+        fprintf(stderr, "Reverse and duplex mode are mutally exclusive\n");
+        return EXIT_FAILURE;
+    } else if (reverse) {
+        client_opts.direction = test_reverse;
+    } else if (duplex)
+        client_opts.direction = test_duplex;
+    else {
+        client_opts.direction = test_forward;
+    }
 
     // Prevent client from starting with invalid client-options
     res = sanitize_clientopts(&client_opts, false);

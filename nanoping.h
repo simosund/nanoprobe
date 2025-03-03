@@ -67,6 +67,7 @@ enum nanoping_msg_type {
     msg_syn,
     msg_syn_ack,
     msg_syn_rst,
+    msg_ping_wait,
     msg_ping,
     msg_pong,
     msg_fin,
