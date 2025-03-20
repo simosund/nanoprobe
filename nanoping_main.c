@@ -42,10 +42,10 @@ enum test_direction {
 };
 
 struct nanoping_client_opts {
-  uint32_t count;
-  uint32_t delay;
-  enum timer_type ttype;
-  enum test_direction direction;
+    uint32_t count;
+    uint32_t delay;
+    enum timer_type ttype;
+    enum test_direction direction;
 };
 
 static struct option longopts[] = {
@@ -513,8 +513,8 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 }
 
 static int client_sendloop(const struct sockaddr_in *remaddr,
-                           struct nanoping_instance *ins, int delay_us,
-                           enum timer_type ttype, int dummy_pkt,
+                           struct nanoping_instance *ins,
+                           struct nanoping_client_opts *opts, int dummy_pkt,
                            uint64_t *next_seq, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
@@ -547,9 +547,9 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
                 return res;
         }
 
-        if (delay_us > 0) {
-            res = wait_until_next_interval(start_send, delay_us * NS_PER_US,
-                                           ttype);
+        if (opts->delay > 0) {
+            res = wait_until_next_interval(start_send, opts->delay * NS_PER_US,
+                                           opts->ttype);
             if (res < 0 && res != EINTR) {
                 fprintf(stderr, "Failed waiting until next interval: %s\n",
                         strerror(-res));
@@ -574,21 +574,21 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
 static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
-                                    int delay, enum timer_type ttype,
-                                    bool skip_fin_handshake, int dummy_pkt,
-                                    ssize_t *packet_size,
+                                    struct nanoping_client_opts *opts,
+                                    int dummy_pkt, ssize_t *packet_size,
                                     struct timespec *start,
                                     struct timespec *end)
 {
     uint64_t next_seq;
     int res;
 
-    res = client_sendloop(remaddr, ins, delay, ttype, dummy_pkt, &next_seq,
-                          packet_size, start, end);
+    res = client_sendloop(remaddr, ins, opts, dummy_pkt, &next_seq, packet_size,
+                          start, end);
     if (res)
         return res;
 
-    if (skip_fin_handshake) {
+    if (opts->direction == test_duplex) {
+        // No handshake for duplex mode
         sleep(1);
     } else {
         res = client_fin(remaddr, next_seq, ins);
@@ -917,9 +917,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
             alarm(client_opts->count);
 
         err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                       client_opts->delay, client_opts->ttype,
-                                       client_opts->direction == test_duplex,
-                                       dummy_pkt, &pktsize, &started, &finished);
+                                       client_opts, dummy_pkt, &pktsize,
+                                       &started, &finished);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
@@ -981,9 +980,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
             sleep(1);
 
         alarm(client_opts.count);
-        err = err ?: run_client_ping_sequence(ins, &remaddr, client_opts.delay,
-                                              client_opts.ttype,
-                                              client_opts.direction == test_duplex,
+        err = err ?: run_client_ping_sequence(ins, &remaddr, &client_opts,
                                               dummy_pkt, &pktsize, &started,
                                               &finished);
     }
