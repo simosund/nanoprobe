@@ -34,10 +34,20 @@ enum nanoping_mode {
 };
 
 enum test_direction {
-    test_forward,
+    test_forward = 0,
     test_reverse,
     test_duplex,
     test_n_directions,
+};
+
+struct probe_entry {
+    uint32_t delay;
+    uint16_t pad_bytes;
+};
+
+struct probe_schedule {
+    struct probe_entry *entries;
+    size_t len;
 };
 
 struct nanoping_client_opts {
@@ -64,6 +74,7 @@ static struct option longopts[] = {
     {"timer",          required_argument, NULL, 'T'},
     {"reverse",        no_argument,       NULL, 'R'},
     {"duplex",         no_argument,       NULL, 'D'},
+    {"probe-schedule", required_argument, NULL, 'S'},
     {"help",           no_argument,       NULL, 'h'},
     {0,                0,                 0,     0 }
 };
@@ -78,8 +89,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --ping-size --pong-size --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -164,6 +175,173 @@ static void dump_statistics(struct nanoping_instance *ins,
            (double)ins->txs_collected / ins->pkt_transmitted * 100,
            ins->rxs_collected,
            (double)ins->rxs_collected / ins->pkt_received * 100);
+}
+
+static bool valid_packetsize(int pkt_size, bool verbose)
+{
+    if (pkt_size < TOT_APPNETHDR_SIZE ||
+        pkt_size > TOT_APPNETHDR_SIZE + MAX_PAD_BYTES) {
+        if (verbose)
+            fprintf(stderr, "packet size %d invalid, must be in range [%lu, %lu]\n",
+                    pkt_size, TOT_APPNETHDR_SIZE,
+                    TOT_APPNETHDR_SIZE + MAX_PAD_BYTES);
+        return false;
+    }
+
+    return true;
+}
+
+static int parse_bounded_integer(long long *val, const char *str,
+                                 long long val_min, long long val_max)
+{
+    char *end;
+
+    errno = 0;
+    *val = strtoll(str, &end, 10);
+    if (errno)
+        return -errno;
+
+    if (end == str) // Didn't parse anything
+        return -EINVAL;
+
+    if (*val < val_min || *val > val_max)
+        return -ERANGE;
+
+    return 0;
+}
+
+static int count_char_in_str(const char *str, char c, size_t n)
+{
+    int i, count = 0;
+
+    for (i = 0; i < n; i++) {
+        if (str[i] == '\0')
+            break;
+
+        if (str[i] == c)
+            count++;
+    }
+
+    return count;
+}
+
+static int count_file_lines(const char *path)
+{
+    char buf[4096];
+    int lines = 0;
+    FILE *stream;
+    size_t len;
+
+
+    stream = fopen(path, "r");
+    if (!stream)
+        return -errno;
+
+    while ((len = fread(buf, 1, sizeof(buf), stream)) > 0)
+        lines += count_char_in_str(buf, '\n', len);
+
+    fclose(stream);
+    return lines;
+}
+
+static int parse_probesched_csv_line(char *line, struct probe_entry *entry)
+{
+    char *word;
+    long long val;
+    int n, err;
+
+    n = count_char_in_str(line, ',', strlen(line));
+    if (n != 1) {
+        fprintf(stderr, "Error: Found %d CSV fields, expected 2\n", n + 1);
+        return -EINVAL;
+    }
+
+    word = strtok(line, ",");
+    if (!word) {
+        fprintf(stderr, "Error: No delay field\n");
+        return -EINVAL;
+    }
+
+    err = parse_bounded_integer(&val, word, 0, (1ULL << 32) - 1);
+    if (err) {
+        fprintf(stderr, "Error: %s not a valid delay value\n",
+                word);
+        return err;
+    }
+    entry->delay = val;
+
+    word = strtok(NULL, ",");
+    if (!word) {
+        fprintf(stderr, "Error: No packetsize field\n");
+        return -EINVAL;
+    }
+
+    err = parse_bounded_integer(&val, word, 0, (1ULL << 16));
+    if (err) {
+        fprintf(stderr, "Error: %s not a valid packetsize value\n", word);
+        return err;
+    }
+    if (!valid_packetsize(val, true))
+        return -ERANGE;
+    entry->pad_bytes = val - TOT_APPNETHDR_SIZE;
+
+    return 0;
+}
+
+static int parse_probesched_csv(const char *path,
+                                struct probe_schedule *schedule)
+{
+    struct probe_entry *data;
+    int err, lines, line = 0;
+    FILE *stream = NULL;
+    char buf[128];
+    size_t strl;
+
+    lines = count_file_lines(path);
+    if (lines < 0)
+        return lines;
+
+    data = calloc(lines, sizeof(*data));
+    if (!data)
+        return -ENOMEM;
+
+    stream = fopen(path, "r");
+    if (!stream)
+        return -errno;
+
+    while (fgets(buf, sizeof(buf), stream)) {
+        strl = strlen(buf);
+        if (strl == 0 || (strl == 1 && buf[0] == '\n'))
+            // Empty line - skip
+            continue;
+
+        if (strl == sizeof(buf) - 1 && buf[sizeof(buf) - 1] != '\n') {
+            fprintf(stderr, "Error: %s line %d is longer than %lu characters\n",
+                    path, line, sizeof(buf) - 1);
+            err = -E2BIG;
+            goto err;
+        }
+
+        err = parse_probesched_csv_line(buf, data + line);
+        if (err) {
+            fprintf(stderr, "Error: Unable to parse %s line %d: %s\n", path,
+                    line, strerror(-err));
+            goto err;
+        }
+
+        line++;
+    }
+
+    fclose(stream);
+    schedule->entries = data;
+    schedule->len = line;
+    return 0;
+
+err:
+    if (stream)
+        fclose(stream);
+    free(data);
+    return err;
 }
 
 static void *process_client_receive_task(void *arg)
@@ -516,13 +694,14 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 
 static int client_sendloop(const struct sockaddr_in *remaddr,
                            struct nanoping_instance *ins,
-                           struct nanoping_client_opts *opts, int dummy_pkt,
+                           struct nanoping_client_opts *opts,
+                           struct probe_schedule *schedule, int dummy_pkt,
                            uint64_t *next_seq, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
     struct nanoping_send_request send_request;
-    ssize_t siz, pktsize = 0;
-    uint64_t start_send, i;
+    uint64_t start_send, start_round, delay, i;
+    ssize_t siz, pkt_pad, pktsize = 0;
     int res;
 
     memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
@@ -530,8 +709,20 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
     start_send = clock_gettime_ns(CLOCK_MONOTONIC);
 
     for (i = 1; !atomic_load(&signal_handled); i++) {
+        if (schedule) {
+            if (i > schedule->len)
+                break;
+
+            pkt_pad = schedule->entries[i - 1].pad_bytes;
+            delay = schedule->entries[i - 1].delay;
+            start_round = clock_gettime_ns(CLOCK_MONOTONIC);
+        } else {
+            pkt_pad = opts->ping_pad;
+            delay = opts->delay;
+        }
+
         send_request.seq = i;
-        siz = nanoping_send_one(ins, &send_request, NULL, opts->ping_pad);
+        siz = nanoping_send_one(ins, &send_request, NULL, pkt_pad);
         if (siz < 0)
             return siz;
 
@@ -549,11 +740,15 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
                 return res;
         }
 
-        if (opts->delay > 0) {
-            res = wait_until_next_interval(start_send, opts->delay * NS_PER_US,
+        if (delay > 0) {
+            if (schedule)
+                // For non-fixed delays, the interval algorithm does not work
+                res = wait_until(start_round + delay * NS_PER_US, opts->ttype);
+            else
+                res = wait_until_next_interval(start_send, delay * NS_PER_US,
                                            opts->ttype);
             if (res < 0 && res != EINTR) {
-                fprintf(stderr, "Failed waiting until next interval: %s\n",
+                fprintf(stderr, "Failed waiting for next ping: %s\n",
                         strerror(-res));
                 return res;
             }
@@ -577,6 +772,7 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
                                     struct nanoping_client_opts *opts,
+                                    struct probe_schedule *schedule,
                                     int dummy_pkt, ssize_t *packet_size,
                                     struct timespec *start,
                                     struct timespec *end)
@@ -584,8 +780,8 @@ static int run_client_ping_sequence(struct nanoping_instance *ins,
     uint64_t next_seq;
     int res;
 
-    res = client_sendloop(remaddr, ins, opts, dummy_pkt, &next_seq, packet_size,
-                          start, end);
+    res = client_sendloop(remaddr, ins, opts, schedule, dummy_pkt, &next_seq,
+                          packet_size, start, end);
     if (res)
         return res;
 
@@ -645,7 +841,8 @@ static int64_t sanitize_clientopt(const char *name, int64_t val,
     return val;
 }
 
-static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
+static int sanitize_clientopts(struct nanoping_client_opts *opts,
+                               bool has_schedule, bool fix)
 {
     bool checkcount, checkdelay, checkpingpad, checkpongpad, checkttype;
     int64_t replacement;
@@ -660,9 +857,9 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
         return err;
 
     // Determine which fields need to be checked
-    checkcount = opts->direction != test_forward;
-    checkdelay = opts->direction != test_forward;
-    checkpingpad = opts->direction != test_forward;
+    checkcount = (opts->direction != test_forward) && !has_schedule;
+    checkdelay = (opts->direction != test_forward) && !has_schedule;
+    checkpingpad = (opts->direction != test_forward) && !has_schedule;
     checkpongpad = opts->direction == test_forward;
     checkttype = opts->direction != test_forward;
 
@@ -726,7 +923,8 @@ static void server_log_clientopts(const struct nanoping_client_opts *client_opts
 
 static int server_handshake(struct nanoping_instance *ins,
                             struct sockaddr_in *remaddr,
-                            struct nanoping_client_opts *client_opts)
+                            struct nanoping_client_opts *client_opts,
+                            bool has_schedule)
 {
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
@@ -759,7 +957,7 @@ static int server_handshake(struct nanoping_instance *ins,
 
     server_log_client_connection(&receive_result.remaddr);
 
-    sanitize_clientopts(client_opts, true);
+    sanitize_clientopts(client_opts, has_schedule, true);
     server_log_clientopts(client_opts);
 
     if (client_opts->direction == test_duplex)
@@ -909,7 +1107,8 @@ static void wait_for_ping(enum timer_type ttype)
 }
 
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
-                      int dummy_pkt, struct nanoping_client_opts *client_opts)
+                      int dummy_pkt, struct nanoping_client_opts *client_opts,
+                      struct probe_schedule *schedule)
 {
     struct addrinfo *reminfo;
     struct pthread_thread signal_thread = {0};
@@ -950,11 +1149,11 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         if (client_opts->direction == test_duplex)
             sleep(1);
 
-        if (client_opts->count > 0)
+        if (!schedule && client_opts->count > 0)
             alarm(client_opts->count);
 
         err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                       client_opts, dummy_pkt, &pktsize,
+                                       client_opts, schedule, dummy_pkt, &pktsize,
                                        &started, &finished);
     }
     if (err) {
@@ -973,7 +1172,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     return EXIT_SUCCESS;
 }
 
-static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
+static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
+                      struct probe_schedule *schedule)
 {
     struct pthread_thread signal_thread = {0};
     struct pthread_thread txs_thread = {0};
@@ -996,7 +1196,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 
     printf("nanoping server started on port %s.\n", port);
 
-    err = server_handshake(ins, &remaddr, &client_opts);
+    err = server_handshake(ins, &remaddr, &client_opts, schedule != NULL);
     if (err)
         return EXIT_FAILURE;
 
@@ -1016,10 +1216,11 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
             // In reverse mode, give client some time to transiton to server mode
             sleep(1);
 
-        alarm(client_opts.count);
+        if (!schedule)
+            alarm(client_opts.count);
         err = err ?: run_client_ping_sequence(ins, &remaddr, &client_opts,
-                                              dummy_pkt, &pktsize, &started,
-                                              &finished);
+                                              schedule, dummy_pkt, &pktsize,
+                                              &started, &finished);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
@@ -1038,20 +1239,6 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     return EXIT_SUCCESS;
 }
 
-static bool valid_packetsize(int pkt_size, bool verbose)
-{
-    if (pkt_size < TOT_APPNETHDR_SIZE ||
-        pkt_size > TOT_APPNETHDR_SIZE + MAX_PAD_BYTES) {
-        if (verbose)
-            fprintf(stderr, "packet size %d invalid, must be in range [%lu, %lu]\n",
-                    pkt_size, TOT_APPNETHDR_SIZE,
-                    TOT_APPNETHDR_SIZE + MAX_PAD_BYTES);
-        return false;
-    }
-
-    return true;
-}
-
 int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
@@ -1063,6 +1250,7 @@ int main(int argc, char **argv)
         .ttype = timer_invalid,
         .direction = test_forward,
     };
+    struct probe_schedule schedule = { 0 };
     enum nanoping_mode mode = mode_none;
     char *interface = NULL;
     char *host = NULL;
@@ -1090,7 +1278,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1150,6 +1338,13 @@ int main(int argc, char **argv)
             case 'D':
                 duplex = true;
                 break;
+            case 'S':
+                if (parse_probesched_csv(optarg, &schedule) != 0 ||
+                    schedule.len == 0) {
+                    fprintf(stderr, "Failed parsing CSV %s\n", optarg);
+                    return EXIT_FAILURE;
+                }
+                break;
             case 'h':
             default:
                 usage();
@@ -1173,7 +1368,7 @@ int main(int argc, char **argv)
     }
 
     // Prevent client from starting with invalid client-options
-    res = sanitize_clientopts(&client_opts, false);
+    res = sanitize_clientopts(&client_opts, false, false);
     if (res) {
         fprintf(stderr, "Invalid client option: %s\n", strerror(-res));
         return EXIT_FAILURE;
@@ -1199,9 +1394,11 @@ int main(int argc, char **argv)
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, host, port, dummy_pkt, &client_opts);
+        res = run_client(ins, host, port, dummy_pkt, &client_opts,
+                         schedule.len > 0 ? &schedule : NULL);
     } else {
-        res = run_server(ins, port, dummy_pkt);
+        res = run_server(ins, port, dummy_pkt,
+                         schedule.len > 0 ? &schedule : NULL);
     }
     nanoping_finish(ins);
     return res;
