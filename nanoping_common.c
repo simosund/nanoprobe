@@ -19,7 +19,13 @@
 #include <linux/net_tstamp.h>
 #include <linux/sockios.h>
 #include <linux/errqueue.h>
+#include <linux/udp.h>
+#include <linux/ip.h>
+#include <linux/if_ether.h>
 #include "nanoping.h"
+
+#define TOT_LINKHDR_SIZE (sizeof(struct udphdr) + sizeof(struct iphdr) + \
+                          sizeof(struct ethhdr))
 
 struct nanoping_msg {
     uint64_t seq;
@@ -559,7 +565,7 @@ int nanoping_txs_one(struct nanoping_instance *ins)
     struct iovec iov = {pktbuf, sizeof(pktbuf)};
     struct nanoping_msg *msg;
     int res;
-    ssize_t siz, headsiz;
+    ssize_t siz;
     int stamp_found = 0;
     struct timespec stamp;
 
@@ -609,12 +615,12 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         perror("recvmsg(errqueue)");
         return siz;
     }
-    if (siz < sizeof(*msg) + ins->pad_bytes) {
-        // fprintf(stderr, "Invalid packet size on txs callback\n"); - Initial SYN packet might have different size
+    if (siz < sizeof(*msg) + TOT_LINKHDR_SIZE) {
+        fprintf(stderr, "Invalid packet size on txs callback\n");
         return -1;
     }
-    headsiz = siz - (sizeof(*msg) + ins->pad_bytes);
-    msg = (struct nanoping_msg *)(((char *)pktbuf) + headsiz);
+
+    msg = (struct nanoping_msg *)(((char *)pktbuf) + TOT_LINKHDR_SIZE);
 
     if ((res = parse_control_msg(&m, &stamp, &stamp_found)) < 0)
         return res;
