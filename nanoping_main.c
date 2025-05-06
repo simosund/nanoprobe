@@ -53,8 +53,9 @@ struct probe_schedule {
 struct nanoping_client_opts {
     uint32_t count;
     uint32_t delay;
-    uint32_t ping_pad;
-    uint32_t pong_pad;
+    uint16_t ping_pad;
+    uint16_t pong_pad;
+    uint32_t pong_every;
     enum timer_type ttype;
     enum test_direction direction;
 };
@@ -75,6 +76,7 @@ static struct option longopts[] = {
     {"reverse",        no_argument,       NULL, 'R'},
     {"duplex",         no_argument,       NULL, 'D'},
     {"probe-schedule", required_argument, NULL, 'S'},
+    {"pong-every",     required_argument, NULL, 'y'},
     {"help",           no_argument,       NULL, 'h'},
     {0,                0,                 0,     0 }
 };
@@ -89,7 +91,7 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
     fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
@@ -845,6 +847,7 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts,
                                bool has_schedule, bool fix)
 {
     bool checkcount, checkdelay, checkpingpad, checkpongpad, checkttype;
+    bool checkpongevery;
     int64_t replacement;
     int err = 0;
 
@@ -861,6 +864,7 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts,
     checkdelay = (opts->direction != test_forward) && !has_schedule;
     checkpingpad = (opts->direction != test_forward) && !has_schedule;
     checkpongpad = opts->direction == test_forward;
+    checkpongevery = opts->direction == test_forward;
     checkttype = opts->direction != test_forward;
 
     if (checkcount) {
@@ -892,6 +896,13 @@ static int sanitize_clientopts(struct nanoping_client_opts *opts,
 
     }
 
+    if (checkpongevery) {
+        opts->pong_every = sanitize_clientopt("pong every", opts->pong_every, 0,
+                                              1000000, &err, fix, NULL, NULL);
+        if (!fix && err)
+            return err;
+    }
+
     if (checkttype) {
         replacement = select_default_timer(opts->delay);
         opts->ttype = sanitize_clientopt("timer type", opts->ttype, 0,
@@ -914,10 +925,11 @@ static void server_log_client_connection(const struct sockaddr_in *remaddr)
 
 static void server_log_clientopts(const struct nanoping_client_opts *client_opts)
 {
-    printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, timer: %s (%d), direction: %s (%d)\n",
+    printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, pong-every: %u, timer: %s (%d), direction: %s (%d)\n",
            client_opts->count, client_opts->delay, client_opts->ping_pad,
-           client_opts->pong_pad, timertype_to_str(client_opts->ttype),
-           client_opts->ttype, testdirection_to_str(client_opts->direction),
+           client_opts->pong_pad, client_opts->pong_every,
+           timertype_to_str(client_opts->ttype), client_opts->ttype,
+           testdirection_to_str(client_opts->direction),
            client_opts->direction);
 }
 
@@ -999,7 +1011,8 @@ static int server_handle_foreign_packet(struct nanoping_instance *ins,
 
 static int server_handle_ping(struct nanoping_instance *ins,
                               const struct nanoping_receive_result *receive_result,
-                              int dummy_pkt, uint16_t pkt_pad, ssize_t *pktsize)
+                              const struct nanoping_client_opts *client_opts,
+                              int dummy_pkt, ssize_t *pktsize)
 {
     struct nanoping_send_dummies_request dummies_request;
     struct nanoping_send_request send_request = {0};
@@ -1027,8 +1040,12 @@ static int server_handle_ping(struct nanoping_instance *ins,
                 fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoring\n");
                 break;
             }
+            if (client_opts->pong_every == 0 ||
+                receive_result->seq % client_opts->pong_every != 0)
+                break;
+
             prepare_server_reply(&send_request, receive_result, msg_pong);
-            res = nanoping_send_one(ins, &send_request, NULL, pkt_pad);
+            res = nanoping_send_one(ins, &send_request, NULL, client_opts->pong_pad);
             if (res < 0)
                 return res;
             if (pktsize)
@@ -1054,8 +1071,9 @@ static int server_handle_ping(struct nanoping_instance *ins,
 }
 
 static int server_echoloop(struct nanoping_instance *ins,
-                           const struct sockaddr_in *remaddr, int dummy_pkt,
-                           uint16_t pkt_pad, ssize_t *sent_pktsize,
+                           const struct sockaddr_in *remaddr,
+                           const struct nanoping_client_opts *client_opts,
+                           int dummy_pkt, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
     struct nanoping_receive_result receive_result;
@@ -1071,7 +1089,7 @@ static int server_echoloop(struct nanoping_instance *ins,
             return res;
 
         if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0) {
-            res = server_handle_ping(ins, &receive_result, dummy_pkt, pkt_pad,
+            res = server_handle_ping(ins, &receive_result, client_opts, dummy_pkt,
                                      pktsize == 0 ? &pktsize : NULL);
 
             if (first_rcv == 0 && receive_result.type == msg_ping)
@@ -1142,7 +1160,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_server_threads(ins, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                     dummy_pkt, client_opts->pong_pad, &pktsize,
+                                     client_opts, dummy_pkt, &pktsize,
                                      &started, &finished);
     } else {
         // In duplex mode - give server some time to transition to client mode
@@ -1201,7 +1219,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
         return EXIT_FAILURE;
 
     if (client_opts.direction == test_forward) {
-        err = server_echoloop(ins, &remaddr, dummy_pkt, client_opts.pong_pad,
+        err = server_echoloop(ins, &remaddr, &client_opts, dummy_pkt,
                               &pktsize, &started, &finished);
     } else {
         // reverse or duplex - switch to client-mode
@@ -1247,6 +1265,7 @@ int main(int argc, char **argv)
         .delay = 100,
         .ping_pad = 0,
         .pong_pad = 0,
+        .pong_every = 1,
         .ttype = timer_invalid,
         .direction = test_forward,
     };
@@ -1278,7 +1297,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1344,6 +1363,9 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Failed parsing CSV %s\n", optarg);
                     return EXIT_FAILURE;
                 }
+                break;
+            case 'y':
+                client_opts.pong_every = atoi(optarg);
                 break;
             case 'h':
             default:
