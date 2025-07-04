@@ -14,7 +14,7 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <arpa/inet.h>
-#include "nanoping.h"
+#include "nanoprobe.h"
 
 // Some limits for acceptable values for server in reverse mode
 #define CLIENT_MAX_COUNT 3600 // 1h
@@ -50,7 +50,7 @@ struct probe_schedule {
     size_t len;
 };
 
-struct nanoping_client_opts {
+struct nanoprobe_client_opts {
     uint32_t count;
     uint32_t delay;
     uint16_t ping_pad;
@@ -91,8 +91,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -161,7 +161,7 @@ static void dump_statistics(struct nanoping_instance *ins,
 
     double duration_s = duration->tv_sec + (double)duration->tv_nsec / NS_PER_S;
 
-    printf("--- nanoping statistics ---\n");
+    printf("--- nanoprobe statistics ---\n");
     printf("packet size %zd bytes, time %ld.%09ld s\n",
            size + TOT_NETHDR_SIZE, duration->tv_sec, duration->tv_nsec);
     printf("%lu packets transmitted (%.1f pps), %lu received (%.1f pps)",
@@ -593,7 +593,7 @@ static int setup_server_threads(struct nanoping_instance *ins,
 
 static int client_handshake(const struct sockaddr_in *remaddr,
                             struct nanoping_instance *ins,
-                            struct nanoping_client_opts *client_opts)
+                            struct nanoprobe_client_opts *client_opts)
 {
     struct nanoping_send_request send_request = {0};
     bool first_time = true;
@@ -696,7 +696,7 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 
 static int client_sendloop(const struct sockaddr_in *remaddr,
                            struct nanoping_instance *ins,
-                           struct nanoping_client_opts *opts,
+                           struct nanoprobe_client_opts *opts,
                            struct probe_schedule *schedule, int dummy_pkt,
                            uint64_t *next_seq, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
@@ -773,7 +773,7 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
 static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
-                                    struct nanoping_client_opts *opts,
+                                    struct nanoprobe_client_opts *opts,
                                     struct probe_schedule *schedule,
                                     int dummy_pkt, ssize_t *packet_size,
                                     struct timespec *start,
@@ -843,7 +843,7 @@ static int64_t sanitize_clientopt(const char *name, int64_t val,
     return val;
 }
 
-static int sanitize_clientopts(struct nanoping_client_opts *opts,
+static int sanitize_clientopts(struct nanoprobe_client_opts *opts,
                                bool has_schedule, bool fix)
 {
     bool checkcount, checkdelay, checkpingpad, checkpongpad, checkttype;
@@ -923,7 +923,7 @@ static void server_log_client_connection(const struct sockaddr_in *remaddr)
     printf("Connected to client %s:%u\n", buf, ntohs(remaddr->sin_port));
 }
 
-static void server_log_clientopts(const struct nanoping_client_opts *client_opts)
+static void server_log_clientopts(const struct nanoprobe_client_opts *client_opts)
 {
     printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, pong-every: %u, timer: %s (%d), direction: %s (%d)\n",
            client_opts->count, client_opts->delay, client_opts->ping_pad,
@@ -935,7 +935,7 @@ static void server_log_clientopts(const struct nanoping_client_opts *client_opts
 
 static int server_handshake(struct nanoping_instance *ins,
                             struct sockaddr_in *remaddr,
-                            struct nanoping_client_opts *client_opts,
+                            struct nanoprobe_client_opts *client_opts,
                             bool has_schedule)
 {
     struct nanoping_receive_result receive_result = {0};
@@ -1011,7 +1011,7 @@ static int server_handle_foreign_packet(struct nanoping_instance *ins,
 
 static int server_handle_ping(struct nanoping_instance *ins,
                               const struct nanoping_receive_result *receive_result,
-                              const struct nanoping_client_opts *client_opts,
+                              const struct nanoprobe_client_opts *client_opts,
                               int dummy_pkt, ssize_t *pktsize)
 {
     struct nanoping_send_dummies_request dummies_request;
@@ -1072,7 +1072,7 @@ static int server_handle_ping(struct nanoping_instance *ins,
 
 static int server_echoloop(struct nanoping_instance *ins,
                            const struct sockaddr_in *remaddr,
-                           const struct nanoping_client_opts *client_opts,
+                           const struct nanoprobe_client_opts *client_opts,
                            int dummy_pkt, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
@@ -1125,7 +1125,7 @@ static void wait_for_ping(enum timer_type ttype)
 }
 
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
-                      int dummy_pkt, struct nanoping_client_opts *client_opts,
+                      int dummy_pkt, struct nanoprobe_client_opts *client_opts,
                       struct probe_schedule *schedule)
 {
     struct addrinfo *reminfo;
@@ -1149,7 +1149,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    printf("nanoping %s:%s...\n", host, port);
+    printf("nanoprobe %s:%s...\n", host, port);
 
     err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins,
                            client_opts);
@@ -1198,7 +1198,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
     struct pthread_thread receive_thread = {0};
     struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
     struct timespec started, finished, duration;
-    struct nanoping_client_opts client_opts;
+    struct nanoprobe_client_opts client_opts;
     struct sockaddr_in remaddr;
     ssize_t pktsize = 0;
     int err;
@@ -1212,7 +1212,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
         return EXIT_FAILURE;
     }
 
-    printf("nanoping server started on port %s.\n", port);
+    printf("nanoprobe server started on port %s.\n", port);
 
     err = server_handshake(ins, &remaddr, &client_opts, schedule != NULL);
     if (err)
@@ -1260,7 +1260,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
 int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
-    struct nanoping_client_opts client_opts = {
+    struct nanoprobe_client_opts client_opts = {
         .count = 0,
         .delay = 100,
         .ping_pad = 0,

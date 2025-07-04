@@ -2,14 +2,14 @@ CFLAGS=-Wall -Werror -std=gnu11 -O2
 LDFLAGS=-lpthread
 CC=clang
 
-all: nanoping
+all: nanoprobe
 
-OBJS = nanoping_main.o nanoping_common.o
-nanoping: $(OBJS) nanoping.h
+OBJS = nanoprobe_main.o nanoprobe_common.o
+nanoprobe: $(OBJS) nanoprobe.h
 	$(CC) -o $@ $(OBJS) $(LDFLAGS)
 
 clean:
-	rm -rf *.o nanoping
+	rm -rf *.o nanoprobe
 
 install:
-	cp nanoping /usr/local/bin/
+	cp nanoprobe /usr/local/bin/
