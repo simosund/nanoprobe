@@ -1,107 +1,79 @@
-# nanoping
+# nanoprobe
 
-"nanoping" is a high time accuracy ping program that relies on hardware time stamping function on ethernet controller hardwares.
-The nanoping enables pricise packet timestamping at NIC phy/mac layer, therfore it is no delay and jitter by software process.
+"nanoprobe" is a high time accuracy ping-like program, based on [nanoping](https://github.com/iij/nanoping), that relies on the hardware time stamping function of the Network Interface Card (NIC).
+The nanoprobe tool enables precise packet timestamping at NIC phy/mac layer, and thereby allows precise measurements of the actual network latency that is unaffected by any additional delay/jitter components form the local network stack or application.
 
-Timestamp resolution and precision is defined by the hardware oscillator on ethernet controller.
-For example, minimum timestamping resolution is 12.5ns on the Intel X550 ethernet controller, because it has 80MHz oscillator for the timestamping function.
+Timestamp resolution and precision is defined by the hardware oscillator on the Ethernet controller.
+For example, minimum timestamping resolution is 12.5ns on the Intel X550 Ethernet controller, because it has 80MHz oscillator for the timestamping function.
 
 ## Requirements
-- Linux 4.x kernel (We tested on Ubuntu 18.04LTS)
-- [latest ixgbe driver](https://sourceforge.net/projects/e1000/files/ixgbe%20stable/) (We tested ixgbe 5.3.7 and 5.5.2)
-- NIC with Intel ethernet controller
-  - Recommended NIC: X550 series ethernet controller (X550 PCIe NIC or X553 on Intel SoC)
-  - Supported NIC (with some limitations): i210, i350, i82599, X520, X540, XL710
-  - Alternatively, another NIC which has hardware timestamp function with Linux device driver is probably able to use the nanoping.
+- Linux 4.x kernel or newer (we've tested on Ubuntu 22.04LTS)
+- NIC with support for hardware timestamping (`SOF_TIMESTAMPING_{RX,TX}_HARDWARE`) and driver support for it
+  - We've tested with the Intel X550-T2 Ethernet card
+  - You can check support with `ethtool -T <interface>`
+  - If you do not have a NIC with hardware timestamping support, you can run with the `--emulation` option to get software (at application layer) timestamps instead, but then you are likely better served by e.g. [IRTT](https://github.com/heistp/irtt)
 
 ## How to build
 
-- run ```make``` command on the nanoping source directory.
+- run ```make``` command on the nanoprobe source directory.
 - run ```make install```
 
 ## How to use
 
-nanoping is client and server type application.
-You have to setup the server mode nanoping on the target server before start client mode nanoping.
-After server side nanoping is ready, user can start client side nanoping.
-Root privilege is required to execute the nanoping.
+nanoprobe is a client and server application.
+You have to setup the server mode nanoprobe on the target server before starting client mode nanoprobe.
+When the nanoprobe server is running, the user can then start the client side nanoprobe.
+Root privilege is typically required to use nanoprobe with hardware timestamping (not needed in `--emulation` mode).
 
-Following is a typical example of nanoping setting.
+Following is a typical example of nanoprobe usage.
 
 On server host:
 
 ```
-$ nanoping --server --interface <network interface>
+$ nanoprobe --server --interface <network interface>
 ```
 On client host:
 
 ```
-$ nanoping  --client --interface <network interface> --delay 1000000 <IP address of server host>
+$ nanoprobe --client --interface <network interface> --delay 10000 <IP address of server host>
 ```
 
-The client-side nanoping outputs the results as traditional ping-like result.
+By default, the nanoprobe server and client only provide some high level statistics at the end of a session.
+To get per-packet output (that can be used to calculate e.g. RTTs, one-way delay etc) use the `--log file` option
 
-```
-$ sudo nanoping --client --interface eno0 --count 5 --delay 100 192.168.0.1
-nanoping 192.168.0.1:10666...
-192.168.0.1: seq=1 time=268ns
-192.168.0.1: seq=2 time=268ns
-192.168.0.1: seq=3 time=269ns
-<snip>
-192.168.0.1: seq=26971 time=256ns
-192.168.0.1: seq=26972 time=262ns
-192.168.0.1: seq=26973 time=262ns
---- nanoping statistics ---
-26976 packets transmitted, 26975 received, 0.003707% packet loss, time 5.429561 s
-26975 RX stamp collected, 26976 TX stamp collected
-RX: found 26973 previous RX stamp, found 26973 previous TX timestamp
-TX: found 0 previous RX stamp, found 0 previous TX stamping
-TX: TX stamp too late 0
-26973 Remote RX stamp collected, 26973 Remote TX stamp collected
-26973 delta_t calcurated
-SWD min/avg/max = 249/261/275 ns
-```
 ### Command line options
 
-The same nanoping binary can work as both of server and client.
-Two modes have different command line options as below.
+The same nanoprobe binary can work as either server or client, depending on the initial (mandatory) `--client` or `--server` option.
+The two modes have the different command line options as below.
 
-#### server side
-```
-server: nanoping --server --interface [nic] --port [port] --emulation
---ptpmode --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]
-```
-
-- ```--server```:  server mode.
-- ```--interface [nic]```(or ```-i```): specify NIC name to bind the server socket.
-- ```--port [port]```(or ```-p```): (optional) specify the port number to bind the server socket. default port: 10666.
-- ```--emulation```(or ```-e```): (optional) emulate hardware timestamping function. With the option, nanoping will work on any ethernet controller that has no PTP/hardware timestamp function. However time precision is almost same as normal ping application.
-- ```--ptpmode```(or ```-P```): (optional) camouflage ping-pong probe packets as PTP packet. Some ethernet controller has strict filtering for timestamp target packet only for PTP protocol, this option is effective for suck kind of NICs (for example Intel XL710).
-- ```--silent```(or ```-s```): (optional) suppress output to the console.
-- ```--timeout [usec]```(or ```-t```): (optional) specify timeout threshold of ping transaction.
-- ```--busypoll [usec]```(or ```-b```): (optional) set ```SO_BUSY_POLL``` socket option for ping-pong socket (see detail socket(7))
-- ```--dummy-pkt [cnt]```(or ```-x```): (optional) send additional [cnt] packets during each ping-pong transaction.  This option produces broader bandwidth for the measurements stream.
-
-#### client side
-
-```
-client: nanoping --client --interface [nic] --count [sec] --delay [usec]
---port [port] --log [log] --emulation --ptpmode --silent
---timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]
+```console
+$ nanoprobe --help
+usage:
+  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]
+  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]
 ```
 
-- ```--client```: client mode.
-- - ```--interface [nic]```(or ```-i```): specify NIC name to send/recv ping-pong packets.
-- ```--count [sec]```(or ```-n```): (optional) duration of nanoping measurement. default: 0 = for ever.
-- ```--delay [usec]```(or ```-d```): (optional) interval of each ping packets. default: 100usec
-- ```--port [port]```(or ```-p```): (optional) specify port number of server side process. default port: 10666
-- ```--log [log]```(or ```-l```): (optional) if a filename was given, detail log will be recoreded to the file.
-- ```--emulation```(or ```-e```): (optional) enable emaulation of hardware timestaping function.
-- ```--ptpmode```(or ```-P```): (optional) camouflage ping-poing probe packets as PTP packet.
-- ```--silent```(or ```-s```): (optional) suppress output to the console.
-- ```--timeout [usec]```(or ```-t```): (optional) specify timeout threshold of ping transaction. default: 5000000usec(=5sec)
-- ```--busypoll [usec]```(or ```-b```): (optional) set ```SO_BUSY_POLL``` socket option for ping-pong socket (see detail socket(7))
-- ```--dummy_pkt [cnt]```(or ```-x```): (optional) send additional [cnt] packets during each ping-pong transaction. This option enables broader bandwidth for the measurement stream.
+- `--client`: Run in client mode, the IPv4 address of the server has to be provided as the **final** argument.
+- `--server`: Run in server mode.
+- `--interface/-i <iface>`: specify interface name to send/receive ping-pong packets.
+- `--port/-p <port>`: Specify the port to bind to (if server) or connect to (if client). Default port is 10666.
+- `--log/-l <filename>`: Log per-packet timestamps in a CSV-format to the provided file.
+- `--count/-n <sec>`: The duration of the nanoprobe measurement in seconds. Set to 0 to run forever (only supported in the "forward" test direction)
+- `--delay/-d <usec>`: The target time in microseconds between sending ping packets.
+- `--emulation/-e`: Use software timestamps from the nanoprobe process instead of hardware timestamps supplied by the NIC
+- `--timeout/-t <usec>`: Set the timeout value in microseconds for how long to wait for a ping or pong packet before failing. Sets the `SO_RCVTIMEO` socket option on the ping/pong socket. Default is 5 seconds.
+- `--busypoll/-b`: Set `SO_BUSY_POLL` socket option for ping/pong socket (see man socket(7) for details).
+- `--dummy-pkt/-x <n>`: Send n additional packets during each ping-pong transaction. This option produces broader bandwidth for the measurements stream. Inherited from nanoping but not really tested with nanoprobe.
+- `--timer/-T <sleep/busy>`: Determines how to wait for the required time between packets to achieve the target delay. The sleep option tries to sleep until the next packet needs to be sent, but this tends to be quite inaccurate at sub-millisecond timescales. The `busy` alternative instead busy loops until the next packet needs to be sent, which achieves much greater accuracy (typically within one microsecond) but at the cost of burning CPU cycles. Defaults to busy if delay <= 1ms, otherwise sleep.
+- `--ping-size/-s <bytes>`: The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
+- `--pong-size/-o <bytes>`: The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
+- `--probe-schedule/-S <csv-file>`: Provide a schedule for the ping packets in a CSV with the delay and ping-size for each packet. The CSV format is `<delay>,<ping-size>` (with delay and ping-size specified as for the corresponding options) with one line per packet, no header. The test will run until each packet in the schedule has been sent. This option overrides any supplied delay, ping-size and count options. In order for the server to be able to follow a schedule (in the reverse and duplex modes) the server must be started with this option, the client will not share the schedule with the server.
+- `--pong-every/-y <n>`: Only pong (reply to) every n:th ping message. The value 0 will disable ponging altogether (NOTE: this may cause the application to timeout depending on the test duration and the supplied `timeout` value). Default is to pong every ping.
+- `--reverse/-R`: Instead of the nanoprobe client pinging the server, request that the server pings the client. This can be useful if the client is behind NAT, so that the server and clients cannot simply swap places. This is mutually exclusive with the `duplex` option.
+- `--duplex/-D`: Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the `reverse` option.
+
+
+
 
 ## Time stamp points
 
@@ -116,50 +88,92 @@ client: nanoping --client --interface [nic] --count [sec] --delay [usec]
           v               v
 ```
 
-Each ping-pong transaction has 4 timestamps, and these are enough to calculate RTT (Round Trip Time) between client and server. RTT is calculated by ((t3-t0) - (t2-t1))/2.
+Each ping-pong transaction has 4 timestamps, and these are enough to calculate RTT (Round Trip Time) between client and server. RTT is calculated by (t3-t0) - (t2-t1). If the client and server have synchronized clocks it's also possible to calculate the OWD as t1 - t0 and t3 - t2.
 
-## Accuracy of nanoping timestamps
+The sketch above assumes the default "forward" test, where the client pings the server. For the reverse mode the server will ping the client, so t0 will then be the time the server sends the ping. In other words, t0 is always the time of ping transmission, t1 the time of ping reception, t2 the time of pong transmission, and t3 the time of pong reception, regardless of which side is sending the pings and pongs.
 
-Nanoping uses timestamp function in a ethernet controller hardware.
-Hardware timestamp is driven oscillator on the ethernet controller, threrfore the accuracy of the nanoping measurement depends on the acuracy of it.
+In the duplex mode there are no pongs, so no t2 or t3 timestamps. To distinguish the timestamps of the pings sent by the client from the pings sent by the server, the timestamps may be suffixed by `cs` (client to server) or `sc` (server to client) to indicate the direction of the packet.
 
-For example, Intel X550 ethernet controller has 80MHz oscillator for the time stamp hardware (*1). The resolution is a 12.5ns tick. Nanoping can record all timestamps in the accuracy.
+## Accuracy of nanoprobe timestamps
+
+Nanoprobe uses the timestamp function of the Ethernet controller hardware.
+Hardware timestamping is driven by the oscillator on the Ethernet controller, therefore the accuracy of the nanoprobe measurement depends on the acuracy of it.
+
+For example, Intel X550 ethernet controller has 80MHz oscillator for the time stamp hardware (*1). The resolution is a 12.5ns tick. Nanoprobe can record all timestamps in the accuracy.
 However, each individual internal oscillator has its unique characteristics,
 Usually, a little clock difference exists in some PPMs (up to 50ppm).
-So without external reference clock to calibrate the internal oscillator, the clock diffrence between client and server ethernet controllers generate some errors to prevent enough accurate OWD (one-way dealy) calucuration.
+So without external reference clock to calibrate the internal oscillator, the clock diffrence between client and server ethernet controllers generate some errors to prevent enough accurate OWD (one-way delay) calculation.
 
 (*1) [Intel Ethernet controller X550 Datasheet](https://www.intel.com/content/dam/www/public/us/en/documents/datasheets/ethernet-x550-datasheet.pdf)  7.7 Time SYNC (IEEE1588 and 802.1AS)
 
 
 ## Log file format
 
-With the ```--log``` option, nanoping records all packet timestamp.
+With the ```--log``` option, nanoprobe records all local packet timestamps in a CSV, i.e. timestamps for the packets that the client or server receives or transmits themselves.
+To get all 4 timestamps of a ping-pong transaction, it's therefore necessary to collect the logs from both the server and the client.
 
+The general format is `seq,timestamp-idx,timestamp,size`, where seq is the ping/pong sequence number, timestamp-idx is the t0-t3 identifier from the [previous section](#time-stamp-points) denoting the type of timestamp, the timestamp is unix-like timestamp (i.e. time in seconds since the epoch of the hardware clock, with the fractional part having nanosecond resolution), and size is the packet size in bytes (including the IP header).
+
+Example client log:
+```csv
+seq,timestamp-idx,timestamp,size
+1,t0,1750785880.108711082,1500
+1,t3,1750785880.108856872,44
+2,t0,1750785880.208848716,1500
+2,t3,1750785880.208985752,44
+3,t0,1750785880.309014078,1500
+3,t3,1750785880.309151451,44
+4,t0,1750785880.409012596,1500
+4,t3,1750785880.409150208,44
+5,t0,1750785880.508925389,1500
+5,t3,1750785880.509061837,44
+...
 ```
-seq,stat,t0,t1,t2,t3,t3-t0,t2-t1,sum,delta_t,num_txs
-2,ok,1541667306.439213316,1541667289.936457336,1541667289.936648473,1541667306.455477441,0.016264125,0.000191137,0.016072988,0.008036494,0
-3,ok,1541667306.479411253,1541667289.976654473,1541667289.976845561,1541667306.495676028,0.016264775,0.000191088,0.016073687,0.008036843,0
-4,ok,1541667306.519617941,1541667290.016862798,1541667290.017053523,1541667306.535884953,0.016267012,0.000190725,0.016076287,0.008038143,0
-5,ok,1541667306.559821753,1541667290.057067098,1541667290.057258598,1541667306.576086553,0.016264800,0.000191500,0.016073300,0.008036650,0
-6,ok,1541667306.600030153,1541667290.097274811,1541667290.097461248,1541667306.616290553,0.016260400,0.000186437,0.016073963,0.008036981,0
-7,ok,1541667306.640261566,1541667290.137505873,1541667290.137697973,1541667306.656527566,0.016266000,0.000192100,0.016073900,0.008036950,0
-8,ok,1541667306.680469216,1541667290.177714611,1541667290.177904523,1541667306.696738903,0.016269687,0.000189912,0.016079775,0.008039887,0
-9,ok,1541667306.720678691,1541667290.217923186,1541667290.218114036,1541667306.736946166,0.016267475,0.000190850,0.016076625,0.008038312,0
-10,ok,1541667306.760887441,1541667290.258132511,1541667290.258323798,1541667306.777152741,0.016265300,0.000191287,0.016074013,0.008037006,0
-11,ok,1541667306.801080578,1541667290.298324298,1541667290.298513748,1541667306.817348741,0.016268163,0.000189450,0.016078713,0.008039356,0
-<snip>
+
+Example server log:
+```csv
+seq,timestamp-idx,timestamp,size
+1,t1,1750785880.108757199,1500
+1,t2,1750785880.108821219,44
+2,t1,1750785880.208893991,1500
+2,t2,1750785880.208953081,44
+3,t1,1750785880.309060320,1500
+3,t2,1750785880.309118229,44
+4,t1,1750785880.409057529,1500
+4,t2,1750785880.409117519,44
+5,t1,1750785880.508970814,1500
+5,t2,1750785880.509030545,44
+...
 ```
 
-Each line in the log file shows one ping-pong transaction. From the left column,
+For the duplex mode, where the timestamp-idx is a bit different as explained in the [previous section](#time-stamp-points), the client log might look like:
+```csv
+seq,timestamp-idx,timestamp,size
+1,t0cs,1750786039.119817369,44
+1,t1sc,1750786039.120157983,44
+2,t0cs,1750786039.219992840,44
+2,t1sc,1750786039.220227892,44
+3,t0cs,1750786039.320095265,44
+3,t1sc,1750786039.320202667,44
+4,t1sc,1750786039.420159023,44
+4,t0cs,1750786039.420114931,44
+5,t1sc,1750786039.520227558,44
+5,t0cs,1750786039.520130364,44
+...
+```
 
-- Sequence #
-- transaction status.
-- t0: ping sent time at the client.
-- t1: ping recieved time at the server.
-- t2: pong sent time at the server.
-- t3: pong received time at the client.
-- t3-t0: time delta between ping sent and pong received at the client side.
-- t2-t1: time delta between ping received and pong sent at the server side.
-- sum: (t3-t0)-(t2-t1) (RTT)
-- delta_t: RTT/2
-- num_txs: debug information, ignore it.
+And the server log:
+```csv
+seq,timestamp-idx,timestamp,size
+1,t1cs,1750786039.119919386,44
+1,t0sc,1750786039.120071407,44
+2,t1cs,1750786039.220087266,44
+2,t0sc,1750786039.220149850,44
+3,t1cs,1750786039.320188952,44
+3,t0sc,1750786039.320174470,44
+4,t1cs,1750786039.420159057,44
+4,t0sc,1750786039.420114930,44
+5,t1cs,1750786039.520227565,44
+5,t0sc,1750786039.520160273,44
+...
+```

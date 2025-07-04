@@ -19,7 +19,7 @@
 #include <linux/net_tstamp.h>
 #include <linux/sockios.h>
 #include <linux/errqueue.h>
-#include "nanoping.h"
+#include "nanoprobe.h"
 
 struct nanoping_emul_txs {
     uint64_t seq;
