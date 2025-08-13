@@ -1193,11 +1193,13 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    printf("nanoprobe %s:%s...\n", host, port);
-
+    printf("Attempting to connect to %s:%s...\n", host, port);
     err = client_handshake(recv_thread_args.remaddr, ins, client_opts);
-    if (err)
+    if (err) {
+        fprintf(stderr, "Failed connecting to server: %s\n", strerror(-err));
         return EXIT_FAILURE;
+    }
+    printf("Connection established\n");
 
     if (client_opts->direction == test_reverse) {
         err = close_threads(threads, ARRAY_SIZE(threads));
@@ -1259,8 +1261,10 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
     printf("nanoprobe server started on port %s.\n", port);
 
     err = server_handshake(ins, &remaddr, &client_opts, schedule != NULL);
-    if (err)
+    if (err) {
+        fprintf(stderr, "Failed connecting to client: %s\n", strerror(-err));
         return EXIT_FAILURE;
+    }
 
     if (client_opts.direction == test_forward) {
         err = server_echoloop(ins, &remaddr, &client_opts, dummy_pkt,
