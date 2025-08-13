@@ -60,6 +60,11 @@ struct nanoprobe_client_opts {
     enum test_direction direction;
 };
 
+struct nanoprobe_recieve_thread_args {
+    struct nanoping_instance *ins;
+    struct sockaddr_in *remaddr;
+};
+
 static struct option longopts[] = {
     {"interface",      required_argument, NULL, 'i'},
     {"count",          required_argument, NULL, 'n'},
@@ -346,18 +351,39 @@ err:
     return err;
 }
 
+static bool is_from_expected_sender(const struct nanoping_receive_result *receive_result,
+                                    const struct sockaddr_in *remaddr)
+{
+    return memcmp(&receive_result->remaddr, remaddr, sizeof(*remaddr)) == 0;
+}
+
+static void client_handle_foreign_packet(const struct nanoping_receive_result *receive_result)
+{
+    char ip_str[INET6_ADDRSTRLEN] = "";
+
+    inet_ntop(receive_result->remaddr.sin_family,
+              &receive_result->remaddr.sin_addr, ip_str, sizeof(ip_str));
+    fprintf(stderr, "Received packet from unexpected destination %s:%u\n",
+            ip_str, ntohs(receive_result->remaddr.sin_port));
+    return;
+}
+
 static void *process_client_receive_task(void *arg)
 {
-    struct nanoping_instance *ins = (struct nanoping_instance *)arg;
+    struct nanoprobe_recieve_thread_args *args = arg;
     struct nanoping_receive_result receive_result = {0};
     ssize_t siz;
 
-
-    nanoping_wait_for_receive(ins);
+    nanoping_wait_for_receive(args->ins);
     for (;;) {
-        siz = nanoping_receive_one(ins, &receive_result, NULL, NULL);
+        siz = nanoping_receive_one(args->ins, &receive_result, NULL, NULL);
         if (siz < 0)
             exit(EXIT_FAILURE);
+
+        if (!is_from_expected_sender(&receive_result, args->remaddr)) {
+            client_handle_foreign_packet(&receive_result);
+            continue;
+        }
 
         switch (receive_result.type) {
             case msg_syn_ack:
@@ -537,14 +563,14 @@ static int setup_txtstamp_thread(struct pthread_thread *txs_thread,
 }
 
 static int setup_receive_thread(struct pthread_thread *receive_thread,
-                                struct nanoping_instance *ins)
+                                struct nanoprobe_recieve_thread_args *args)
 {
     int err;
 
     receive_thread->valid = false;
 
     if ((err = pthread_create(&receive_thread->thread, NULL,
-                              process_client_receive_task, ins))) {
+                              process_client_receive_task, args))) {
         errno = err;
         perror("pthread_create(receive_thread)");
         return -err;
@@ -554,7 +580,7 @@ static int setup_receive_thread(struct pthread_thread *receive_thread,
     return 0;
 }
 
-static int setup_client_threads(struct nanoping_instance *ins,
+static int setup_client_threads(struct nanoprobe_recieve_thread_args *args,
                                 struct pthread_thread *signal_thread,
                                 struct pthread_thread *txs_thread,
                                 struct pthread_thread *receive_thread)
@@ -571,11 +597,11 @@ static int setup_client_threads(struct nanoping_instance *ins,
     if (err)
         return err;
 
-    err = setup_txtstamp_thread(txs_thread, ins);
+    err = setup_txtstamp_thread(txs_thread, args->ins);
     if (err)
         goto err_threads;
 
-    err = setup_receive_thread(receive_thread, ins);
+    err = setup_receive_thread(receive_thread, args);
     if (err)
         goto err_threads;
 
@@ -1089,7 +1115,7 @@ static int server_echoloop(struct nanoping_instance *ins,
         if (res < 0)
             return res;
 
-        if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0) {
+        if (is_from_expected_sender(&receive_result, remaddr)) {
             res = server_handle_ping(ins, &receive_result, client_opts, dummy_pkt,
                                      pktsize == 0 ? &pktsize : NULL);
 
@@ -1134,6 +1160,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     struct pthread_thread txs_thread = {0};
     struct pthread_thread receive_thread = {0};
     struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
+    struct nanoprobe_recieve_thread_args recv_thread_args;
     struct timespec started, finished, duration;
     ssize_t pktsize = 0;
     int err;
@@ -1144,7 +1171,10 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    err = setup_client_threads(ins, &signal_thread, &txs_thread, &receive_thread);
+    recv_thread_args.ins = ins;
+    recv_thread_args.remaddr = (struct sockaddr_in *)reminfo->ai_addr;
+    err = setup_client_threads(&recv_thread_args, &signal_thread, &txs_thread,
+                               &receive_thread);
     if (err) {
         fprintf(stderr, "Failed setting up client threads: %s\n", strerror(-err));
         return EXIT_FAILURE;
@@ -1152,8 +1182,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 
     printf("nanoprobe %s:%s...\n", host, port);
 
-    err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins,
-                           client_opts);
+    err = client_handshake(recv_thread_args.remaddr, ins, client_opts);
     if (err)
         return EXIT_FAILURE;
 
@@ -1198,6 +1227,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
     struct pthread_thread txs_thread = {0};
     struct pthread_thread receive_thread = {0};
     struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
+    struct nanoprobe_recieve_thread_args recv_thread_args;
     struct timespec started, finished, duration;
     struct nanoprobe_client_opts client_opts;
     struct sockaddr_in remaddr;
@@ -1225,8 +1255,10 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
     } else {
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
-        err = err ?: setup_client_threads(ins, &signal_thread, &txs_thread,
-                                          &receive_thread);
+        recv_thread_args.ins = ins;
+        recv_thread_args.remaddr = &remaddr;
+        err = err ?: setup_client_threads(&recv_thread_args, &signal_thread,
+                                          &txs_thread, &receive_thread);
 
         if (client_opts.direction == test_duplex)
             // In duplex mode, wait for first ping from client
