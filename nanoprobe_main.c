@@ -368,10 +368,19 @@ static void client_handle_foreign_packet(const struct nanoping_receive_result *r
     return;
 }
 
+static void prepare_server_reply(struct nanoping_send_request *send_request,
+                                 const struct nanoping_receive_result *receive_result,
+                                 enum nanoping_msg_type msg_type) {
+    send_request->seq = receive_result->seq;
+    send_request->remaddr = receive_result->remaddr;
+    send_request->type = msg_type;
+}
+
 static void *process_client_receive_task(void *arg)
 {
     struct nanoprobe_recieve_thread_args *args = arg;
     struct nanoping_receive_result receive_result = {0};
+    struct nanoping_send_request send_request = {0};
     ssize_t siz;
 
     nanoping_wait_for_receive(args->ins);
@@ -386,6 +395,18 @@ static void *process_client_receive_task(void *arg)
         }
 
         switch (receive_result.type) {
+            case msg_syn:
+                /*
+                 * If we were initially a server that has switched into
+                 * "client-mode" (for the reverse or duplex option),
+                 * resend SYN-ACK to (original) client to handle potential
+                 * loss of the initial SYN-ACK
+                 */
+                if (args->ins->server) {
+                    prepare_server_reply(&send_request, &receive_result, msg_syn_ack);
+                    nanoping_send_one(args->ins, &send_request, NULL, 0);
+                }
+                break;
             case msg_syn_ack:
                 if (atomic_load(&state) == msg_syn)
                     atomic_store(&state, msg_syn_ack);
@@ -825,14 +846,6 @@ static int run_client_ping_sequence(struct nanoping_instance *ins,
 
     return 0;
 
-}
-
-static void prepare_server_reply(struct nanoping_send_request *send_request,
-                                 const struct nanoping_receive_result *receive_result,
-                                 enum nanoping_msg_type msg_type) {
-    send_request->seq = receive_result->seq;
-    send_request->remaddr = receive_result->remaddr;
-    send_request->type = msg_type;
 }
 
 static enum timer_type select_default_timer(int delay_us)
