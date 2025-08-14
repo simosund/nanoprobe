@@ -111,7 +111,6 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
 			  struct nanoping_send_request *request,
 			  void *payload_buf, size_t payload_len);
 int nanoping_txs_one(struct nanoping_instance *ins);
-void nanoping_reset_state(struct nanoping_instance *ins);
 void nanoping_finish(struct nanoping_instance *ins);
 
 #endif

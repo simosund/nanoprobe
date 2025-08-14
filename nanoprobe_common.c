@@ -556,14 +556,6 @@ int nanoping_txs_one(struct nanoping_instance *ins)
     return 0;
 }
 
-void nanoping_reset_state(struct nanoping_instance *ins)
-{
-    ins->pkt_received = 0;
-    ins->pkt_transmitted = 0;
-    ins->rxs_collected = 0;
-    ins->txs_collected = 0;
-}
-
 void nanoping_finish(struct nanoping_instance *ins)
 {
     assert(ins);
