@@ -383,7 +383,6 @@ static void *process_client_receive_task(void *arg)
     struct nanoping_send_request send_request = {0};
     ssize_t siz;
 
-    nanoping_wait_for_receive(args->ins);
     for (;;) {
         siz = nanoping_receive_one(args->ins, &receive_result, NULL, NULL);
         if (siz < 0)
