@@ -74,7 +74,6 @@ static struct option longopts[] = {
     {"emulation",      no_argument,       NULL, 'e'},
     {"timeout",        required_argument, NULL, 't'},
     {"busypoll",       required_argument, NULL, 'b'},
-    {"dummy-pkt",      required_argument, NULL, 'x'},
     {"ping-size",      required_argument, NULL, 's'},
     {"pong-size",      required_argument, NULL, 'o'},
     {"timer",          required_argument, NULL, 'T'},
@@ -96,8 +95,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -425,7 +424,6 @@ static void *process_client_receive_task(void *arg)
                 }
                 break;
             case msg_pong:
-            case msg_dummy:
                 /* do nothing */
                 break;
             case msg_fin_ack:
@@ -744,7 +742,7 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 static int client_sendloop(const struct sockaddr_in *remaddr,
                            struct nanoping_instance *ins,
                            struct nanoprobe_client_opts *opts,
-                           struct probe_schedule *schedule, int dummy_pkt,
+                           struct probe_schedule *schedule,
                            uint64_t *next_seq, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
@@ -777,17 +775,6 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
         if (!pktsize)
             pktsize = siz;
-
-        if (dummy_pkt > 0) {
-            struct nanoping_send_dummies_request dummies_request;
-            memcpy(&dummies_request.remaddr, remaddr,
-                   sizeof(dummies_request.remaddr));
-            dummies_request.nmsg = dummy_pkt;
-
-            res = nanoping_send_dummies(ins, &dummies_request);
-            if (res <= 0)
-                return res;
-        }
 
         if (delay > 0) {
             if (schedule)
@@ -822,15 +809,15 @@ static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
                                     struct nanoprobe_client_opts *opts,
                                     struct probe_schedule *schedule,
-                                    int dummy_pkt, ssize_t *packet_size,
+                                    ssize_t *packet_size,
                                     struct timespec *start,
                                     struct timespec *end)
 {
     uint64_t next_seq;
     int res;
 
-    res = client_sendloop(remaddr, ins, opts, schedule, dummy_pkt, &next_seq,
-                          packet_size, start, end);
+    res = client_sendloop(remaddr, ins, opts, schedule, &next_seq, packet_size,
+                          start, end);
     if (res)
         return res;
 
@@ -1051,9 +1038,8 @@ static int server_handle_foreign_packet(struct nanoping_instance *ins,
 static int server_handle_ping(struct nanoping_instance *ins,
                               const struct nanoping_receive_result *receive_result,
                               const struct nanoprobe_client_opts *client_opts,
-                              int dummy_pkt, ssize_t *pktsize)
+                              ssize_t *pktsize)
 {
-    struct nanoping_send_dummies_request dummies_request;
     struct nanoping_send_request send_request = {0};
     int res;
 
@@ -1090,17 +1076,6 @@ static int server_handle_ping(struct nanoping_instance *ins,
             if (pktsize)
                 *pktsize = res;
 
-            if (dummy_pkt) {
-                dummies_request.remaddr = receive_result->remaddr;
-                dummies_request.nmsg = dummy_pkt;
-
-                res = nanoping_send_dummies(ins, &dummies_request);
-                if (res <= 0)
-                    return res;
-            }
-            break;
-        case msg_dummy:
-            /* do nothing */
             break;
         default:
             fprintf(stderr, "Illegal packet received, ignoring.\n");
@@ -1112,7 +1087,7 @@ static int server_handle_ping(struct nanoping_instance *ins,
 static int server_echoloop(struct nanoping_instance *ins,
                            const struct sockaddr_in *remaddr,
                            const struct nanoprobe_client_opts *client_opts,
-                           int dummy_pkt, ssize_t *sent_pktsize,
+                           ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
     struct nanoping_receive_result receive_result;
@@ -1128,7 +1103,7 @@ static int server_echoloop(struct nanoping_instance *ins,
             return res;
 
         if (is_from_expected_sender(&receive_result, remaddr)) {
-            res = server_handle_ping(ins, &receive_result, client_opts, dummy_pkt,
+            res = server_handle_ping(ins, &receive_result, client_opts,
                                      pktsize == 0 ? &pktsize : NULL);
 
             if (first_rcv == 0 && receive_result.type == msg_ping)
@@ -1164,7 +1139,7 @@ static void wait_for_ping(enum timer_type ttype)
 }
 
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
-                      int dummy_pkt, struct nanoprobe_client_opts *client_opts,
+                      struct nanoprobe_client_opts *client_opts,
                       struct probe_schedule *schedule)
 {
     struct addrinfo *reminfo;
@@ -1204,8 +1179,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_server_threads(ins, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                     client_opts, dummy_pkt, &pktsize,
-                                     &started, &finished);
+                                     client_opts, &pktsize, &started, &finished);
     } else {
         // In duplex mode - give server some time to transition to client mode
         if (client_opts->direction == test_duplex)
@@ -1215,7 +1189,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
             alarm(client_opts->count);
 
         err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                       client_opts, schedule, dummy_pkt, &pktsize,
+                                       client_opts, schedule, &pktsize,
                                        &started, &finished);
     }
     if (err) {
@@ -1234,7 +1208,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     return EXIT_SUCCESS;
 }
 
-static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
+static int run_server(struct nanoping_instance *ins, char *port,
                       struct probe_schedule *schedule)
 {
     struct pthread_thread signal_thread = {0};
@@ -1266,8 +1240,8 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
     }
 
     if (client_opts.direction == test_forward) {
-        err = server_echoloop(ins, &remaddr, &client_opts, dummy_pkt,
-                              &pktsize, &started, &finished);
+        err = server_echoloop(ins, &remaddr, &client_opts, &pktsize,
+                              &started, &finished);
     } else {
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
@@ -1286,7 +1260,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
         if (!schedule)
             alarm(client_opts.count);
         err = err ?: run_client_ping_sequence(ins, &remaddr, &client_opts,
-                                              schedule, dummy_pkt, &pktsize,
+                                              schedule, &pktsize,
                                               &started, &finished);
     }
     if (err) {
@@ -1327,7 +1301,6 @@ int main(int argc, char **argv)
     bool emulation = false;
     int timeout = 5000000;
     int busy_poll = 0;
-    int dummy_pkt = 0;
     int c, res, nargc = argc;
     bool reverse = false, duplex = false;
 
@@ -1385,9 +1358,6 @@ int main(int argc, char **argv)
                 break;
             case 'b':
                 busy_poll = atoi(optarg);
-                break;
-            case 'x':
-                dummy_pkt = atoi(optarg);
                 break;
             case 'T':
                 client_opts.ttype = str_to_timertype(optarg);
@@ -1465,11 +1435,10 @@ int main(int argc, char **argv)
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, host, port, dummy_pkt, &client_opts,
+        res = run_client(ins, host, port, &client_opts,
                          schedule.len > 0 ? &schedule : NULL);
     } else {
-        res = run_server(ins, port, dummy_pkt,
-                         schedule.len > 0 ? &schedule : NULL);
+        res = run_server(ins, port, schedule.len > 0 ? &schedule : NULL);
     }
     nanoping_finish(ins);
     return res;

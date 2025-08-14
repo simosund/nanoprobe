@@ -49,8 +49,8 @@ The two modes have the different command line options as below.
 ```console
 $ nanoprobe --help
 usage:
-  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]
-  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]
+  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]
+  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv]
 ```
 
 - `--client`: Run in client mode, the IPv4 address of the server has to be provided as the **final** argument.
@@ -63,7 +63,6 @@ usage:
 - `--emulation/-e`: Use software timestamps from the nanoprobe process instead of hardware timestamps supplied by the NIC
 - `--timeout/-t <usec>`: Set the timeout value in microseconds for how long to wait for a ping or pong packet before failing. Sets the `SO_RCVTIMEO` socket option on the ping/pong socket. Default is 5 seconds.
 - `--busypoll/-b`: Set `SO_BUSY_POLL` socket option for ping/pong socket (see man socket(7) for details).
-- `--dummy-pkt/-x <n>`: Send n additional packets during each ping-pong transaction. This option produces broader bandwidth for the measurements stream. Inherited from nanoping but not really tested with nanoprobe.
 - `--timer/-T <sleep/busy>`: Determines how to wait for the required time between packets to achieve the target delay. The sleep option tries to sleep until the next packet needs to be sent, but this tends to be quite inaccurate at sub-millisecond timescales. The `busy` alternative instead busy loops until the next packet needs to be sent, which achieves much greater accuracy (typically within one microsecond) but at the cost of burning CPU cycles. Defaults to busy if delay <= 1ms, otherwise sleep.
 - `--ping-size/-s <bytes>`: The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
 - `--pong-size/-o <bytes>`: The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).

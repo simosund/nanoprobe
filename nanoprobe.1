@@ -42,7 +42,6 @@
 .Op Fl Fl emulation | Fl e
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
-.Op Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
 .Op Fl Fl timer Ar busy|sleep | Fl T Ar busy|sleep
 .Op Fl Fl ping-size Ar bytes | Fl s Ar bytes
 .Op Fl Fl pong-size Ar bytes | Fl o Ar bytes
@@ -59,7 +58,6 @@ host
 .Op Fl Fl emulation | Fl e
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
-.Op Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
 .\" ###### Description ######################################################
 .Sh DESCRIPTION
@@ -82,8 +80,6 @@ Run in client mode, the IPv4 address of the server has to be provided as the fin
 The duration of the nanoprobe measurement in seconds. Set to 0 to run forever (only supported in the "forward" test direction)
 .It Fl Fl delay Ar usec | Fl d Ar usec
 The target time in microseconds between sending ping packets.
-.It Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
-Send n additional packets during each ping-pong transaction. This option produces broader bandwidth for the measurements stream. Inherited from nanoping but not really tested with nanoprobe.
 .It Fl Fl duplex | Fl D
 Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the "reverse" option.
 .It Fl Fl emulation | Fl e

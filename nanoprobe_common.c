@@ -308,18 +308,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         return NULL;
     }
 
-    if ((ins->nots_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("socket");
-        return NULL;
-    }
-
     if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
-                    strlen(interface)+1)) < 0) {
-        perror("SO_BINDTODEVICE");
-        return NULL;
-    }
-
-    if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
                     strlen(interface)+1)) < 0) {
         perror("SO_BINDTODEVICE");
         return NULL;
@@ -339,17 +328,6 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
             return NULL;
         }
 
-        if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeo,
-                        sizeof(timeo))) < 0) {
-            perror("SO_RCVTIMEO");
-            return NULL;
-        }
-
-        if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeo,
-                        sizeof(timeo))) < 0) {
-            perror("SO_SNDTIMEO");
-            return NULL;
-        }
     }
 
     ins->myaddr.sin_family = AF_INET;
@@ -497,52 +475,6 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
 
     ins->pkt_transmitted++;
     return siz;
-}
-
-static int send_dummies_common(struct nanoping_instance *ins, struct sockaddr_in *remaddr, int nmsg, struct iovec *iovs)
-{
-    struct mmsghdr mmsgs[nmsg];
-    int res;
-
-    memset(mmsgs, 0, sizeof(mmsgs));
-    for (int i = 0; i < nmsg; i++) {
-        mmsgs[i].msg_hdr.msg_name = remaddr;
-        mmsgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
-        mmsgs[i].msg_hdr.msg_iov = &iovs[i];
-        mmsgs[i].msg_hdr.msg_iovlen = 1;
-    }
-
-    res = sendmmsg(ins->nots_fd, mmsgs, nmsg, 0);
-    if (!res) {
-        fprintf(stderr, "zero dummy packets sent\n");
-    } else if (res < 0) {
-        perror("sendmmsg");
-    }
-    ins->pkt_transmitted += res;
-    return res;
-}
-
-static int send_dummies_msg(struct nanoping_instance *ins, struct sockaddr_in *remaddr, int nmsg)
-{
-    struct nanoping_msg msgs[nmsg];
-    struct iovec iovs[nmsg];
-
-    memset(msgs, 0, sizeof(msgs));
-    memset(iovs, 0, sizeof(iovs));
-    for (int i = 0; i < nmsg; i++) {
-        msgs[i].seq = UINT64_MAX;
-        msgs[i].type = msg_dummy;
-        iovs[i].iov_base = &msgs[i];
-        iovs[i].iov_len = sizeof(struct nanoping_msg);
-    }
-    return send_dummies_common(ins, remaddr, nmsg, iovs);
-}
-
-int nanoping_send_dummies(struct nanoping_instance *ins, struct nanoping_send_dummies_request *request)
-{
-    assert(ins && request);
-
-    return send_dummies_msg(ins, &request->remaddr, request->nmsg);
 }
 
 int nanoping_txs_one(struct nanoping_instance *ins)
