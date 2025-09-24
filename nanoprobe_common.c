@@ -480,7 +480,6 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
 int nanoping_txs_one(struct nanoping_instance *ins)
 {
     fd_set exceptfds;
-    struct sockaddr_in remaddr;
     struct msghdr m = {0};
     char pktbuf[2048];
     char ctrlbuf[1024];
@@ -523,8 +522,8 @@ int nanoping_txs_one(struct nanoping_instance *ins)
 
     m.msg_iov = &iov;
     m.msg_iovlen = 1;
-    m.msg_name = (void *)&remaddr;
-    m.msg_namelen = sizeof(remaddr);
+    m.msg_name = NULL;
+    m.msg_namelen = 0;
     m.msg_control = ctrlbuf;
     m.msg_controllen = sizeof(ctrlbuf);
 
