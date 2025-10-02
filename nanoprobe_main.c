@@ -65,24 +65,30 @@ struct nanoprobe_receive_thread_args {
     struct sockaddr_in *remaddr;
 };
 
+struct nanoprobe_txs_thread_args {
+    struct nanoping_instance *ins;
+    bool busyloop;
+};
+
 static struct option longopts[] = {
-    {"interface",      required_argument, NULL, 'i'},
-    {"count",          required_argument, NULL, 'n'},
-    {"delay",          required_argument, NULL, 'd'},
-    {"port",           required_argument, NULL, 'p'},
-    {"log",            required_argument, NULL, 'l'},
-    {"emulation",      no_argument,       NULL, 'e'},
-    {"timeout",        required_argument, NULL, 't'},
-    {"busypoll",       required_argument, NULL, 'b'},
-    {"ping-size",      required_argument, NULL, 's'},
-    {"pong-size",      required_argument, NULL, 'o'},
-    {"timer",          required_argument, NULL, 'T'},
-    {"reverse",        no_argument,       NULL, 'R'},
-    {"duplex",         no_argument,       NULL, 'D'},
-    {"probe-schedule", required_argument, NULL, 'S'},
-    {"pong-every",     required_argument, NULL, 'y'},
-    {"help",           no_argument,       NULL, 'h'},
-    {0,                0,                 0,     0 }
+    {"interface",         required_argument, NULL, 'i'},
+    {"count",             required_argument, NULL, 'n'},
+    {"delay",             required_argument, NULL, 'd'},
+    {"port",              required_argument, NULL, 'p'},
+    {"log",               required_argument, NULL, 'l'},
+    {"emulation",         no_argument,       NULL, 'e'},
+    {"timeout",           required_argument, NULL, 't'},
+    {"busypoll",          required_argument, NULL, 'b'},
+    {"ping-size",         required_argument, NULL, 's'},
+    {"pong-size",         required_argument, NULL, 'o'},
+    {"timer",             required_argument, NULL, 'T'},
+    {"reverse",           no_argument,       NULL, 'R'},
+    {"duplex",            no_argument,       NULL, 'D'},
+    {"probe-schedule",    required_argument, NULL, 'S'},
+    {"pong-every",        required_argument, NULL, 'y'},
+    {"busyloop-txtstamp", no_argument,       NULL, 'B'},
+    {"help",              no_argument,       NULL, 'h'},
+    {0,                   0,                 0,     0 }
 };
 
 static atomic_bool signal_initialized       = false;
@@ -95,8 +101,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -383,6 +389,13 @@ static void init_receivethread_args(struct nanoprobe_receive_thread_args *args,
     args->remaddr = remaddr;
 }
 
+static void init_txsthread_args(struct nanoprobe_txs_thread_args *args,
+                                struct nanoping_instance *ins, bool busyloop)
+{
+    args->ins = ins;
+    args->busyloop = busyloop;
+}
+
 static void *process_client_receive_task(void *arg)
 {
     struct nanoprobe_receive_thread_args *args = arg;
@@ -487,10 +500,10 @@ static void *process_client_signal_task(void *arg)
 
 static void *process_txs_task(void *arg)
 {
-    struct nanoping_instance *ins = (struct nanoping_instance *)arg;
+    struct nanoprobe_txs_thread_args *args = arg;
 
     for (;;)
-        nanoping_txs_one(ins);
+        nanoping_txs_one(args->ins, args->busyloop);
     return NULL;
 }
 
@@ -571,14 +584,14 @@ static int setup_singal_handling(struct pthread_thread *signal_thread)
 }
 
 static int setup_txtstamp_thread(struct pthread_thread *txs_thread,
-                                 struct nanoping_instance *ins)
+                                 struct nanoprobe_txs_thread_args *args)
 {
     int err;
 
     txs_thread->valid = false;
 
     if ((err = pthread_create(&txs_thread->thread, NULL, process_txs_task,
-                              ins))) {
+                              args))) {
         errno = err;
         perror("pthread_create(txs_thread)");
         return -err;
@@ -606,7 +619,8 @@ static int setup_receive_thread(struct pthread_thread *receive_thread,
     return 0;
 }
 
-static int setup_client_threads(struct nanoprobe_receive_thread_args *args,
+static int setup_client_threads(struct nanoprobe_receive_thread_args *rcvt_args,
+                                struct nanoprobe_txs_thread_args *txst_args,
                                 struct pthread_thread *signal_thread,
                                 struct pthread_thread *txs_thread,
                                 struct pthread_thread *receive_thread)
@@ -623,11 +637,11 @@ static int setup_client_threads(struct nanoprobe_receive_thread_args *args,
     if (err)
         return err;
 
-    err = setup_txtstamp_thread(txs_thread, args->ins);
+    err = setup_txtstamp_thread(txs_thread, txst_args);
     if (err)
         goto err_threads;
 
-    err = setup_receive_thread(receive_thread, args);
+    err = setup_receive_thread(receive_thread, rcvt_args);
     if (err)
         goto err_threads;
 
@@ -638,10 +652,10 @@ err_threads:
     return err;
 }
 
-static int setup_server_threads(struct nanoping_instance *ins,
+static int setup_server_threads(struct nanoprobe_txs_thread_args *args,
                                 struct pthread_thread *txs_thread)
 {
-    return setup_txtstamp_thread(txs_thread, ins);
+    return setup_txtstamp_thread(txs_thread, args);
 }
 
 static int client_handshake(const struct sockaddr_in *remaddr,
@@ -1148,7 +1162,7 @@ static void wait_for_ping(enum timer_type ttype)
 
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
                       struct nanoprobe_client_opts *client_opts,
-                      struct probe_schedule *schedule)
+                      struct probe_schedule *schedule, bool busyloop_txs)
 {
     struct addrinfo *reminfo;
     struct pthread_thread signal_thread = {0};
@@ -1156,6 +1170,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     struct pthread_thread receive_thread = {0};
     struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
     struct nanoprobe_receive_thread_args recvt_args;
+    struct nanoprobe_txs_thread_args txst_args;
     struct timespec started, finished, duration;
     ssize_t pktsize = 0;
     int err;
@@ -1168,8 +1183,9 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 
     init_receivethread_args(&recvt_args, ins,
                             (struct sockaddr_in *)reminfo->ai_addr);
-    err = setup_client_threads(&recvt_args, &signal_thread, &txs_thread,
-                               &receive_thread);
+    init_txsthread_args(&txst_args, ins, busyloop_txs);
+    err = setup_client_threads(&recvt_args, &txst_args, &signal_thread,
+                               &txs_thread, &receive_thread);
     if (err) {
         fprintf(stderr, "Failed setting up client threads: %s\n", strerror(-err));
         return EXIT_FAILURE;
@@ -1185,7 +1201,7 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 
     if (client_opts->direction == test_reverse) {
         err = close_threads(threads, ARRAY_SIZE(threads));
-        err = err ?: setup_server_threads(ins, &txs_thread);
+        err = err ?: setup_server_threads(&txst_args, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
                                      client_opts, &pktsize, &started, &finished);
     } else {
@@ -1217,13 +1233,14 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 }
 
 static int run_server(struct nanoping_instance *ins, char *port,
-                      struct probe_schedule *schedule)
+                      struct probe_schedule *schedule, bool busyloop_txs)
 {
     struct pthread_thread signal_thread = {0};
     struct pthread_thread txs_thread = {0};
     struct pthread_thread receive_thread = {0};
     struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
     struct nanoprobe_receive_thread_args recvt_args;
+    struct nanoprobe_txs_thread_args txst_args;
     struct timespec started, finished, duration;
     struct nanoprobe_client_opts client_opts;
     struct sockaddr_in remaddr;
@@ -1233,7 +1250,8 @@ static int run_server(struct nanoping_instance *ins, char *port,
     pthread_cond_init(&ping_wait_cond, NULL);
     pthread_mutex_init(&ping_wait_lock, NULL);
 
-    err = setup_server_threads(ins, &txs_thread);
+    init_txsthread_args(&txst_args, ins, busyloop_txs);
+    err = setup_server_threads(&txst_args, &txs_thread);
     if (err) {
         fprintf(stderr, "Failed setting up server threads: %s\n", strerror(-err));
         return EXIT_FAILURE;
@@ -1254,8 +1272,9 @@ static int run_server(struct nanoping_instance *ins, char *port,
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
         init_receivethread_args(&recvt_args, ins, &remaddr);
-        err = err ?: setup_client_threads(&recvt_args, &signal_thread,
-                                          &txs_thread, &receive_thread);
+        err = err ?: setup_client_threads(&recvt_args, &txst_args,
+                                          &signal_thread, &txs_thread,
+                                          &receive_thread);
 
         if (client_opts.direction == test_duplex)
             // In duplex mode, wait for first ping from client
@@ -1310,6 +1329,7 @@ int main(int argc, char **argv)
     int busy_poll = 0;
     int c, res, nargc = argc;
     bool reverse = false, duplex = false;
+    bool busyloop_txs = false;
 
     if (argc >= 2) {
         if (!strcmp(argv[1], "--server")) {
@@ -1326,7 +1346,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:Bh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1393,6 +1413,9 @@ int main(int argc, char **argv)
             case 'y':
                 client_opts.pong_every = atoi(optarg);
                 break;
+            case 'B':
+                busyloop_txs = true;
+                break;
             case 'h':
             default:
                 usage();
@@ -1443,9 +1466,10 @@ int main(int argc, char **argv)
 
     if (mode == mode_client) {
         res = run_client(ins, host, port, &client_opts,
-                         schedule.len > 0 ? &schedule : NULL);
+			 schedule.len > 0 ? &schedule : NULL, busyloop_txs);
     } else {
-        res = run_server(ins, port, schedule.len > 0 ? &schedule : NULL);
+        res = run_server(ins, port, schedule.len > 0 ? &schedule : NULL,
+			 busyloop_txs);
     }
     nanoping_finish(ins);
     return res;

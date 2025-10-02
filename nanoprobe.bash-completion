@@ -89,7 +89,9 @@ _nanoprobe()
 
    # ====== All options =====================================================
    local opts="
+-B
 -b
+--busyloop-txtstamp
 --busypoll
 --client
 --count

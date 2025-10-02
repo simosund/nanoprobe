@@ -47,6 +47,7 @@
 .Op Fl Fl pong-size Ar bytes | Fl o Ar bytes
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
 .Op Fl Fl pong-every Ar n | Fl y Ar n
+.Op Fl Fl busyloop-txtstamp | Fl B
 .Op Fl Fl reverse | Fl R
 .Op Fl Fl duplex | Fl D
 host
@@ -59,6 +60,7 @@ host
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.Op Fl Fl busyloop-txtstamp | Fl B
 .\" ###### Description ######################################################
 .Sh DESCRIPTION
 .Nm nanoprobe
@@ -72,6 +74,8 @@ For example, minimum timestamping resolution is 12.5ns on the Intel X550 Etherne
 .Sh ARGUMENTS
 The following arguments may be provided:
 .Bl -tag -width indent
+.It Fl Fl busyloop-txtstamp | Fl B
+Run a busyloop reading the socket error queue for TX timestamps instead of waiting for the availability of something on the error queue being signaled via `select()`. This can help with retrieving more hardware TX timestamps in high packet rate (low delay) scenarios.
 .It Fl Fl busypoll Ar usec | Fl b Ar usec
 Set "SO_BUSY_POLL" socket option for ping/pong socket (see man socket(7) for details).
 .It Fl Fl client
