@@ -1500,8 +1500,8 @@ int main(int argc, char **argv)
                 duplex = true;
                 break;
             case 'S':
-                if (parse_probesched_csv(optarg, &schedule) != 0 ||
-                    schedule.len == 0) {
+                err = parse_probesched_csv(optarg, &schedule);
+                if (err || schedule.len == 0) {
                     fprintf(stderr, "Failed parsing CSV %s\n", optarg);
                     return EXIT_FAILURE;
                 }
