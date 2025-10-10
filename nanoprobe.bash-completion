@@ -45,14 +45,15 @@ _nanoprobe()
 
    case "${prev}" in
       #  ====== Generic value ===============================================
-      --busypoll   | -b | \
-      --count      | -n | \
-      --delay      | -d | \
-      --port       | -p | \
-      --timeout    | -t | \
-      --ping-size  | -s | \
-      --pong-size  | -o | \
-      --pong-every | -y)
+      --busypoll    | -b | \
+      --count       | -n | \
+      --delay       | -d | \
+      --port        | -p | \
+      --timeout     | -t | \
+      --ping-size   | -s | \
+      --pong-size   | -o | \
+      --pong-every  | -y | \
+      --pin-threads | -P)
          return
          ;;
 
@@ -107,7 +108,9 @@ _nanoprobe()
 --log
 -n
 -o
+-P
 -p
+--pin-threads
 --ping-size
 --pong-every
 --pong-size

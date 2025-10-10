@@ -48,6 +48,7 @@
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
 .Op Fl Fl pong-every Ar n | Fl y Ar n
 .Op Fl Fl busyloop-txtstamp | Fl B
+.Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
 .Op Fl Fl reverse | Fl R
 .Op Fl Fl duplex | Fl D
 host
@@ -61,6 +62,7 @@ host
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
 .Op Fl Fl busyloop-txtstamp | Fl B
+.Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
 .\" ###### Description ######################################################
 .Sh DESCRIPTION
 .Nm nanoprobe
@@ -92,6 +94,8 @@ Use software timestamps from the nanoprobe process instead of hardware timestamp
 Specify interface name to send/receive ping-pong packets.
 .It Fl Fl log Ar logfile | Fl l Ar logfile
 Log per-packet timestamps in a CSV-format to the provided file.
+.It Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
+Pin the individual threads of nanoprobe to core x (main thread), y (TX timestamp fetching thread), and z (pong receive thread). This can be useful when sending packets at high rates (low delays) to reduce interference from CPU scheduling and migration.
 .It Fl Fl ping-size Ar bytes | Fl s Ar bytes
 The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
 .It Fl Fl pong-every Ar n | Fl y Ar n

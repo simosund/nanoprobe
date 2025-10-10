@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -63,11 +64,19 @@ struct nanoprobe_client_opts {
 struct nanoprobe_receive_thread_args {
     struct nanoping_instance *ins;
     struct sockaddr_in *remaddr;
+    int pin_to_core;
 };
 
 struct nanoprobe_txs_thread_args {
     struct nanoping_instance *ins;
+    int pin_to_core;
     bool busyloop;
+};
+
+struct nanoprobe_core_pinning {
+    int main_thread_core;
+    int txs_thread_core;
+    int rcv_thread_core;
 };
 
 static struct option longopts[] = {
@@ -87,6 +96,7 @@ static struct option longopts[] = {
     {"probe-schedule",    required_argument, NULL, 'S'},
     {"pong-every",        required_argument, NULL, 'y'},
     {"busyloop-txtstamp", no_argument,       NULL, 'B'},
+    {"pin-threads",       required_argument, NULL, 'P'},
     {"help",              no_argument,       NULL, 'h'},
     {0,                   0,                 0,     0 }
 };
@@ -101,8 +111,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -356,6 +366,70 @@ err:
     return err;
 }
 
+static int parse_cpucore_list(const char *_str,
+                              struct nanoprobe_core_pinning *core_pinning)
+{
+
+    char *cpunum, *nxt_pos;
+    char str[1024];
+    long long val;
+    int cpus[3];
+    int err, i;
+
+    strncpy(str, _str, sizeof(str));
+    cpunum = strtok_r(str, ",", &nxt_pos);
+
+    for (i = 0; i < ARRAY_SIZE(cpus); i++) {
+        if (!cpunum) {
+            fprintf(stderr,
+                    "'%s' is not a valid CPU-core list, should be of the format 'X,Y,Z'\n",
+                    _str);
+            return -EINVAL;
+        }
+
+        err = parse_bounded_integer(&val, cpunum, 0, 1024);
+        if (err) {
+            fprintf(
+                stderr,
+                "%s is not a valid CPU number, should be in the range [0, 1024]\n",
+                cpunum);
+            return err;
+        }
+
+        cpus[i] = val;
+
+        cpunum = strtok_r(NULL, ",", &nxt_pos);
+    }
+
+    core_pinning->main_thread_core = cpus[0];
+    core_pinning->txs_thread_core = cpus[1];
+    core_pinning->rcv_thread_core = cpus[2];
+
+    return 0;
+}
+
+static int pin_thread_to_core(int cpu_core)
+{
+    cpu_set_t pin_cores;
+    int err;
+
+    // Any negative cpu_core value means don't pin (NOP)
+    if (cpu_core < 0)
+        return 0;
+
+    CPU_ZERO(&pin_cores);
+    CPU_SET(cpu_core, &pin_cores);
+
+    err = pthread_setaffinity_np(pthread_self(), sizeof(pin_cores), &pin_cores);
+    if (err) {
+        fprintf(stderr, "pthread_setaffinity_np(core=%d) failed: %s\n",
+                cpu_core, strerror(err));
+        return -err;
+    }
+
+    return 0;
+}
+
 static bool is_from_expected_sender(const struct nanoping_receive_result *receive_result,
                                     const struct sockaddr_in *remaddr)
 {
@@ -383,17 +457,21 @@ static void prepare_server_reply(struct nanoping_send_request *send_request,
 
 static void init_receivethread_args(struct nanoprobe_receive_thread_args *args,
                                     struct nanoping_instance *ins,
-                                    struct sockaddr_in *remaddr)
+                                    struct sockaddr_in *remaddr,
+                                    const struct nanoprobe_core_pinning *pinning)
 {
     args->ins = ins;
     args->remaddr = remaddr;
+    args->pin_to_core = pinning->rcv_thread_core;
 }
 
 static void init_txsthread_args(struct nanoprobe_txs_thread_args *args,
-                                struct nanoping_instance *ins, bool busyloop)
+                                struct nanoping_instance *ins, bool busyloop,
+                                const struct nanoprobe_core_pinning *pinning)
 {
     args->ins = ins;
     args->busyloop = busyloop;
+    args->pin_to_core = pinning->txs_thread_core;
 }
 
 static void *process_client_receive_task(void *arg)
@@ -402,6 +480,11 @@ static void *process_client_receive_task(void *arg)
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
     ssize_t siz;
+    int err;
+
+    err = pin_thread_to_core(args->pin_to_core);
+    if (err)
+        exit(EXIT_FAILURE);
 
     for (;;) {
         siz = nanoping_receive_one(args->ins, &receive_result, NULL, NULL);
@@ -501,6 +584,11 @@ static void *process_client_signal_task(void *arg)
 static void *process_txs_task(void *arg)
 {
     struct nanoprobe_txs_thread_args *args = arg;
+    int err;
+
+    err = pin_thread_to_core(args->pin_to_core);
+    if (err)
+        exit(EXIT_FAILURE);
 
     for (;;)
         nanoping_txs_one(args->ins, args->busyloop);
@@ -1162,7 +1250,8 @@ static void wait_for_ping(enum timer_type ttype)
 
 static int run_client(struct nanoping_instance *ins, char *host, char *port,
                       struct nanoprobe_client_opts *client_opts,
-                      struct probe_schedule *schedule, bool busyloop_txs)
+                      struct probe_schedule *schedule, bool busyloop_txs,
+                      const struct nanoprobe_core_pinning *pinning)
 {
     struct addrinfo *reminfo;
     struct pthread_thread signal_thread = {0};
@@ -1182,8 +1271,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     }
 
     init_receivethread_args(&recvt_args, ins,
-                            (struct sockaddr_in *)reminfo->ai_addr);
-    init_txsthread_args(&txst_args, ins, busyloop_txs);
+                            (struct sockaddr_in *)reminfo->ai_addr, pinning);
+    init_txsthread_args(&txst_args, ins, busyloop_txs, pinning);
     err = setup_client_threads(&recvt_args, &txst_args, &signal_thread,
                                &txs_thread, &receive_thread);
     if (err) {
@@ -1233,7 +1322,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
 }
 
 static int run_server(struct nanoping_instance *ins, char *port,
-                      struct probe_schedule *schedule, bool busyloop_txs)
+                      struct probe_schedule *schedule, bool busyloop_txs,
+                      const struct nanoprobe_core_pinning *pinning)
 {
     struct pthread_thread signal_thread = {0};
     struct pthread_thread txs_thread = {0};
@@ -1250,7 +1340,7 @@ static int run_server(struct nanoping_instance *ins, char *port,
     pthread_cond_init(&ping_wait_cond, NULL);
     pthread_mutex_init(&ping_wait_lock, NULL);
 
-    init_txsthread_args(&txst_args, ins, busyloop_txs);
+    init_txsthread_args(&txst_args, ins, busyloop_txs, pinning);
     err = setup_server_threads(&txst_args, &txs_thread);
     if (err) {
         fprintf(stderr, "Failed setting up server threads: %s\n", strerror(-err));
@@ -1271,7 +1361,7 @@ static int run_server(struct nanoping_instance *ins, char *port,
     } else {
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
-        init_receivethread_args(&recvt_args, ins, &remaddr);
+        init_receivethread_args(&recvt_args, ins, &remaddr, pinning);
         err = err ?: setup_client_threads(&recvt_args, &txst_args,
                                           &signal_thread, &txs_thread,
                                           &receive_thread);
@@ -1318,6 +1408,11 @@ int main(int argc, char **argv)
         .ttype = timer_invalid,
         .direction = test_forward,
     };
+    struct nanoprobe_core_pinning core_pinning = {
+        .main_thread_core = -1,
+        .txs_thread_core = -1,
+        .rcv_thread_core = -1,
+    };
     struct probe_schedule schedule = { 0 };
     enum nanoping_mode mode = mode_none;
     char *interface = NULL;
@@ -1330,6 +1425,7 @@ int main(int argc, char **argv)
     int c, res, nargc = argc;
     bool reverse = false, duplex = false;
     bool busyloop_txs = false;
+    int err;
 
     if (argc >= 2) {
         if (!strcmp(argv[1], "--server")) {
@@ -1346,7 +1442,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:Bh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:BP:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1416,6 +1512,11 @@ int main(int argc, char **argv)
             case 'B':
                 busyloop_txs = true;
                 break;
+            case 'P':
+                err = parse_cpucore_list(optarg, &core_pinning);
+                if (err)
+                    return EXIT_FAILURE;
+		break;
             case 'h':
             default:
                 usage();
@@ -1464,12 +1565,17 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    err = pin_thread_to_core(core_pinning.main_thread_core);
+    if (err)
+        exit(EXIT_FAILURE);
+
     if (mode == mode_client) {
         res = run_client(ins, host, port, &client_opts,
-			 schedule.len > 0 ? &schedule : NULL, busyloop_txs);
+			 schedule.len > 0 ? &schedule : NULL, busyloop_txs,
+                         &core_pinning);
     } else {
         res = run_server(ins, port, schedule.len > 0 ? &schedule : NULL,
-			 busyloop_txs);
+			 busyloop_txs, &core_pinning);
     }
     nanoping_finish(ins);
     return res;

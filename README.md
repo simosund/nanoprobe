@@ -49,8 +49,8 @@ The two modes have the different command line options as below.
 ```console
 $ nanoprobe --help
 usage:
-  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --reverse/--duplex [host]
-  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp
+  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --reverse/--duplex [host]
+  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]
 ```
 
 - `--client`: Run in client mode, the IPv4 address of the server has to be provided as the **final** argument.
@@ -69,6 +69,7 @@ usage:
 - `--probe-schedule/-S <csv-file>`: Provide a schedule for the ping packets in a CSV with the delay and ping-size for each packet. The CSV format is `<delay>,<ping-size>` (with delay and ping-size specified as for the corresponding options) with one line per packet, no header. The test will run until each packet in the schedule has been sent. This option overrides any supplied delay, ping-size and count options. In order for the server to be able to follow a schedule (in the reverse and duplex modes) the server must be started with this option, the client will not share the schedule with the server.
 - `--pong-every/-y <n>`: Only pong (reply to) every n:th ping message. The value 0 will disable ponging altogether (NOTE: this may cause the application to timeout depending on the test duration and the supplied `timeout` value). Default is to pong every ping.
 - `--busyloop-txtstamp/-B`: Run a busyloop reading the socket error queue for TX timestamps instead of waiting for the availability of something on the error queue being signaled via `select()`. This can help with retrieving more hardware TX timestamps in high packet rate (low delay) scenarios.
+- `--pin-threads/-P <x,y,z>`: Pin the individual threads of nanoprobe to core x (main thread), y (TX timestamp fetching thread), and z (pong receive thread). This can be useful when sending packets at high rates (low delays) to reduce interference from CPU scheduling and migration.
 - `--reverse/-R`: Instead of the nanoprobe client pinging the server, request that the server pings the client. This can be useful if the client is behind NAT, so that the server and clients cannot simply swap places. This is mutually exclusive with the `duplex` option.
 - `--duplex/-D`: Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the `reverse` option.
 
