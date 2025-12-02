@@ -371,11 +371,12 @@ static void *process_client_receive_task(void *arg)
                 fprintf(stderr, "Remote node rejected connection\n");
                 break;
             case msg_ping:
-                if (atomic_load(&state) == msg_ping_wait)
+                if (atomic_load(&state) == msg_ping_wait) {
                     pthread_mutex_lock(&ping_wait_lock);
                     atomic_store(&state, msg_ping);
                     pthread_cond_signal(&ping_wait_cond);
                     pthread_mutex_unlock(&ping_wait_lock);
+                }
                 break;
             case msg_pong:
             case msg_dummy:
