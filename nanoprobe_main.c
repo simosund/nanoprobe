@@ -81,9 +81,9 @@ static struct option longopts[] = {
     {0,                0,                 0,     0 }
 };
 
-static atomic_bool signal_initialized = ATOMIC_VAR_INIT(false);
-static atomic_bool signal_handled = ATOMIC_VAR_INIT(false);
-static _Atomic enum nanoping_msg_type state = ATOMIC_VAR_INIT(msg_none);
+static atomic_bool signal_initialized       = false;
+static atomic_bool signal_handled           = false;
+static _Atomic enum nanoping_msg_type state = msg_none;
 static pthread_mutex_t signal_lock;
 static pthread_mutex_t ping_wait_lock;
 static pthread_cond_t signal_cond;

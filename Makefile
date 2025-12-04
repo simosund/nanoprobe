@@ -1,4 +1,4 @@
-CFLAGS=-Wall -Werror -std=gnu11 -O2
+CFLAGS=-Wall -Werror -O2
 LDFLAGS=-lpthread
 CC=clang
 
