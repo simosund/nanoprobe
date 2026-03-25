@@ -59,6 +59,7 @@ struct nanoprobe_client_opts {
     uint32_t pong_every;
     enum timer_type ttype;
     enum test_direction direction;
+    bool compensate_drift;
 };
 
 struct nanoprobe_receive_thread_args {
@@ -97,6 +98,7 @@ static struct option longopts[] = {
     {"pong-every",        required_argument, NULL, 'y'},
     {"busyloop-txtstamp", no_argument,       NULL, 'B'},
     {"pin-threads",       required_argument, NULL, 'P'},
+    {"compensate-drift",  no_argument,       NULL, 'C'},
     {"help",              no_argument,       NULL, 'h'},
     {0,                   0,                 0,     0 }
 };
@@ -111,7 +113,7 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --compensate-drift --reverse/--duplex [host]\n");
     fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]\n");
 }
 
@@ -883,7 +885,7 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
                 return res;
             }
 
-        } else {
+        } else if (!opts->compensate_drift) {
             next_start = now;
         }
 
@@ -1048,10 +1050,11 @@ static void server_log_client_connection(const struct sockaddr_in *remaddr)
 
 static void server_log_clientopts(const struct nanoprobe_client_opts *client_opts)
 {
-    printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, pong-every: %u, timer: %s (%d), direction: %s (%d)\n",
+    printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, pong-every: %u, timer: %s (%d), compensate-drift: %s, direction: %s (%d)\n",
            client_opts->count, client_opts->delay, client_opts->ping_pad,
            client_opts->pong_pad, client_opts->pong_every,
            timertype_to_str(client_opts->ttype), client_opts->ttype,
+           client_opts->compensate_drift ? "true" : "false",
            testdirection_to_str(client_opts->direction),
            client_opts->direction);
 }
@@ -1394,6 +1397,7 @@ int main(int argc, char **argv)
         .pong_every = 1,
         .ttype = timer_invalid,
         .direction = test_forward,
+        .compensate_drift = false,
     };
     struct nanoprobe_core_pinning core_pinning = {
         .main_thread_core = -1,
@@ -1429,7 +1433,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:BP:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:BP:Ch", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1504,6 +1508,9 @@ int main(int argc, char **argv)
                 if (err)
                     return EXIT_FAILURE;
 		break;
+            case 'C':
+                client_opts.compensate_drift = true;
+                break;
             case 'h':
             default:
                 usage();

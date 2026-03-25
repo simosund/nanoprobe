@@ -95,6 +95,8 @@ _nanoprobe()
 --busyloop-txtstamp
 --busypoll
 --client
+-C
+--compensate-drift
 --count
 -D
 -d

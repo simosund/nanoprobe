@@ -49,7 +49,7 @@ The two modes have the different command line options as below.
 ```console
 $ nanoprobe --help
 usage:
-  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --reverse/--duplex [host]
+  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --compensate-drift --reverse/--duplex [host]
   server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]
 ```
 
@@ -70,6 +70,7 @@ usage:
 - `--pong-every/-y <n>`: Only pong (reply to) every n:th ping message. The value 0 will disable ponging altogether (NOTE: this may cause the application to timeout depending on the test duration and the supplied `timeout` value). Default is to pong every ping.
 - `--busyloop-txtstamp/-B`: Run a busyloop reading the socket error queue for TX timestamps instead of waiting for the availability of something on the error queue being signaled via `select()`. This can help with retrieving more hardware TX timestamps in high packet rate (low delay) scenarios.
 - `--pin-threads/-P <x,y,z>`: Pin the individual threads of nanoprobe to core x (main thread), y (TX timestamp fetching thread), and z (pong receive thread). This can be useful when sending packets at high rates (low delays) to reduce interference from CPU scheduling and migration.
+- `--compensate-drift/-C`: Attempt to send packets so that the cumulative delay of all packets since the start of the test match the sending schedule rather than trying to hit the configured delay for each individual packet. If nanoprobe falls behind its configured sending schedule (regardless if it's a fixed-interval schedule from --delay or a --probe-schedule), this allows it to undershoot the target delay for subsequent packets to try and "catch up" to its original schedule.
 - `--reverse/-R`: Instead of the nanoprobe client pinging the server, request that the server pings the client. This can be useful if the client is behind NAT, so that the server and clients cannot simply swap places. This is mutually exclusive with the `duplex` option.
 - `--duplex/-D`: Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the `reverse` option.
 
