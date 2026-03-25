@@ -833,22 +833,6 @@ static int wait_until(uint64_t time_ns, enum timer_type ttype)
     return 0;
 }
 
-static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
-                                    enum timer_type ttype)
-{
-    uint64_t now, next_interval;
-
-    now = clock_gettime_ns(CLOCK_MONOTONIC);
-
-    if (now < start_ns)
-        return -ETIME;
-
-    next_interval = now - ((now - start_ns) % interval_ns);
-    next_interval += interval_ns;
-
-    return wait_until(next_interval, ttype);
-}
-
 static int client_sendloop(const struct sockaddr_in *remaddr,
                            struct nanoping_instance *ins,
                            struct nanoprobe_client_opts *opts,
@@ -856,14 +840,15 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
                            uint64_t *next_seq, ssize_t *sent_pktsize,
                            struct timespec *start, struct timespec *end)
 {
+    uint64_t start_send, current_start, now, next_start, delay, i;
     struct nanoping_send_request send_request;
-    uint64_t start_send, start_round, delay, i;
     ssize_t siz, pkt_pad, pktsize = 0;
     int res;
 
     memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
     send_request.type = msg_ping;
     start_send = clock_gettime_ns(CLOCK_MONOTONIC);
+    next_start = start_send;
 
     for (i = 1; !atomic_load(&signal_handled); i++) {
         if (schedule) {
@@ -872,12 +857,12 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
             pkt_pad = schedule->entries[i - 1].pad_bytes;
             delay = schedule->entries[i - 1].delay;
-            start_round = clock_gettime_ns(CLOCK_MONOTONIC);
         } else {
             pkt_pad = opts->ping_pad;
             delay = opts->delay;
         }
 
+        current_start = next_start;
         send_request.seq = i;
         siz = nanoping_send_one(ins, &send_request, NULL, pkt_pad);
         if (siz < 0)
@@ -886,18 +871,20 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
         if (!pktsize)
             pktsize = siz;
 
-        if (delay > 0) {
-            if (schedule)
-                // For non-fixed delays, the interval algorithm does not work
-                res = wait_until(start_round + delay * NS_PER_US, opts->ttype);
-            else
-                res = wait_until_next_interval(start_send, delay * NS_PER_US,
-                                           opts->ttype);
+        next_start = current_start + delay * NS_PER_US;
+        now = clock_gettime_ns(CLOCK_MONOTONIC);
+
+        if (now < next_start) {
+            res = wait_until(next_start, opts->ttype);
+
             if (res < 0 && res != EINTR) {
                 fprintf(stderr, "Failed waiting for next ping: %s\n",
                         strerror(-res));
                 return res;
             }
+
+        } else {
+            next_start = now;
         }
 
     }
