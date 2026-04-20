@@ -1,0 +1,31 @@
+Source: nanoprobe
+Section: net
+Priority: optional
+Maintainer: Thomas Dreibholz <thomas.dreibholz@simula.no>
+Homepage: https://github.com/simosund/nanoprobe
+Build-Depends: cmake,
+               debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+
+Package: nanoprobe
+Architecture: any
+Depends: iproute2,
+         ${misc:Depends},
+         ${shlibs:Depends}
+Recommends: dynmhs,
+            hipercontracer,
+            netperfmeter,
+            subnetcalc
+Suggests: ping | iputils-ping,
+          td-system-tools,
+          traceroute | inetutils-traceroute
+Description: Latency measurement tool
+ A high time accuracy ping-like program, based on nanoping
+ (https://github.com/iij/nanoping), that relies on the hardware time stamping
+ function of the Network Interface Card (NIC). The nanoprobe tool enables
+ precise packet timestamping at NIC phy/mac layer, and thereby allows precise
+ measurements of the actual network latency that is unaffected by any
+ additional delay/jitter components form the local network stack or
+ application. Timestamp resolution and precision is defined by the hardware
+ oscillator on the Ethernet controller.

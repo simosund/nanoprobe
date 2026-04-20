@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+# export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+# Use upstream ChangeLog for installation
+# override_dh_installchangelogs:
+# 	dh_installchangelogs -k ChangeLog
