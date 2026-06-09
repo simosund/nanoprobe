@@ -388,7 +388,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
     }
 
     if (log_path) {
-        ins->log_stream = fopen(log_path, "a");
+        ins->log_stream = fopen(log_path, "w");
         if (!ins->log_stream) {
             perror("fopen(log_path)");
             return NULL;
