@@ -47,6 +47,9 @@
 .Op Fl Fl pong-size Ar bytes | Fl o Ar bytes
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
 .Op Fl Fl pong-every Ar n | Fl y Ar n
+.Op Fl Fl busyloop-txtstamp | Fl B
+.Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
+.Op Fl Fl compensate-drift | Fl C
 .Op Fl Fl reverse | Fl R
 .Op Fl Fl duplex | Fl D
 host
@@ -59,6 +62,8 @@ host
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.Op Fl Fl busyloop-txtstamp | Fl B
+.Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
 .\" ###### Description ######################################################
 .Sh DESCRIPTION
 .Nm nanoprobe
@@ -72,10 +77,14 @@ For example, minimum timestamping resolution is 12.5ns on the Intel X550 Etherne
 .Sh ARGUMENTS
 The following arguments may be provided:
 .Bl -tag -width indent
+.It Fl Fl busyloop-txtstamp | Fl B
+Run a busyloop reading the socket error queue for TX timestamps instead of waiting for the availability of something on the error queue being signaled via `select()`. This can help with retrieving more hardware TX timestamps in high packet rate (low delay) scenarios.
 .It Fl Fl busypoll Ar usec | Fl b Ar usec
 Set "SO_BUSY_POLL" socket option for ping/pong socket (see man socket(7) for details).
 .It Fl Fl client
 Run in client mode, the IPv4 address of the server has to be provided as the final argument.
+.It Fl Fl compensate-drift | Fl C
+Attempt to send packets so that the cumulative delay of all packets since the start of the test match the sending schedule rather than trying to hit the configured delay for each individual packet. If nanoprobe falls behind its configured sending schedule (regardless if it's a fixed-interval schedule from --delay or a --probe-schedule), this allows it to undershoot the target delay for subsequent packets to try and catch up to its original schedule.
 .It Fl Fl count Ar sec | Fl n Ar sec
 The duration of the nanoprobe measurement in seconds. Set to 0 to run forever (only supported in the "forward" test direction)
 .It Fl Fl delay Ar usec | Fl d Ar usec
@@ -88,6 +97,8 @@ Use software timestamps from the nanoprobe process instead of hardware timestamp
 Specify interface name to send/receive ping-pong packets.
 .It Fl Fl log Ar logfile | Fl l Ar logfile
 Log per-packet timestamps in a CSV-format to the provided file.
+.It Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
+Pin the individual threads of nanoprobe to core x (main thread), y (TX timestamp fetching thread), and z (pong receive thread). This can be useful when sending packets at high rates (low delays) to reduce interference from CPU scheduling and migration.
 .It Fl Fl ping-size Ar bytes | Fl s Ar bytes
 The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
 .It Fl Fl pong-every Ar n | Fl y Ar n
