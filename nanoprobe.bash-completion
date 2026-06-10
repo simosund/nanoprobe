@@ -45,15 +45,15 @@ _nanoprobe()
 
    case "${prev}" in
       #  ====== Generic value ===============================================
-      --busypoll   | -b | \
-      --count      | -n | \
-      --delay      | -d | \
-      --port       | -p | \
-      --timeout    | -t | \
-      --dummy-pkt  | -x | \
-      --ping-size  | -s | \
-      --pong-size  | -o | \
-      --pong-every | -y)
+      --busypoll    | -b | \
+      --count       | -n | \
+      --delay       | -d | \
+      --port        | -p | \
+      --timeout     | -t | \
+      --ping-size   | -s | \
+      --pong-size   | -o | \
+      --pong-every  | -y | \
+      --pin-threads | -P)
          return
          ;;
 
@@ -90,14 +90,17 @@ _nanoprobe()
 
    # ====== All options =====================================================
    local opts="
+-B
 -b
+--busyloop-txtstamp
 --busypoll
 --client
+-C
+--compensate-drift
 --count
 -D
 -d
 --delay
---dummy-pkt
 --duplex
 -e
 --emulation
@@ -107,7 +110,9 @@ _nanoprobe()
 --log
 -n
 -o
+-P
 -p
+--pin-threads
 --ping-size
 --pong-every
 --pong-size
@@ -122,7 +127,6 @@ _nanoprobe()
 -t
 --timeout
 --timer
--x
 -y
 "
    # shellcheck disable=SC2207
