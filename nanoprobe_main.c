@@ -66,6 +66,7 @@ static struct option longopts[] = {
     {"delay",          required_argument, NULL, 'd'},
     {"port",           required_argument, NULL, 'p'},
     {"log",            required_argument, NULL, 'l'},
+    {"qos",            required_argument, NULL, 'Q'},
     {"emulation",      no_argument,       NULL, 'e'},
     {"timeout",        required_argument, NULL, 't'},
     {"busypoll",       required_argument, NULL, 'b'},
@@ -91,8 +92,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --qos [TOS] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --qos [TOS] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -1276,6 +1277,7 @@ int main(int argc, char **argv)
     char *host = NULL;
     char *port = "10666";
     char *log = NULL;
+    int tos = 0x00;   // BE
     bool emulation = false;
     int timeout = 5000000;
     int busy_poll = 0;
@@ -1295,10 +1297,10 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
     } else {
-	usage();
-	return EXIT_FAILURE;
+        usage();
+        return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:Q:et:s:o:b:T:RDS:y:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1315,6 +1317,18 @@ int main(int argc, char **argv)
             case 'l':
                 log = optarg;
                 break;
+            case 'Q':
+                {
+                    char* endptr = NULL;
+                    long  value  = strtol(optarg, &endptr, 0);
+                    if( (endptr == NULL) || (*endptr != 0x00) ||
+                        (value < 0x00)   || (value > 0xff) ) {
+                        fprintf(stderr, "Invalid TOS setting %s.\n", optarg);
+                        return EXIT_FAILURE;
+                    }
+                    tos = (int)value;
+                }
+             break;
             case 'e':
                 emulation = true;
                 break;
@@ -1411,7 +1425,7 @@ int main(int argc, char **argv)
      }
 
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, timeout, busy_poll, log,
+                             tos, emulation, timeout, busy_poll, log,
                              client_opts.direction == test_duplex)) == NULL) {
         return EXIT_FAILURE;
     }

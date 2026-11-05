@@ -1,8 +1,10 @@
+# shellcheck shell=bash
+#
 # Nanoprobe Shell Completion
 #
 # MIT License
 #
-# Copyright (C) 2025 by Thomas Dreibholz <dreibh@simula.no>
+# Copyright (C) 2025-2026 by Thomas Dreibholz <dreibh@simula.no>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -49,6 +51,7 @@ _nanoprobe()
       --count      | -n | \
       --delay      | -d | \
       --port       | -p | \
+      --qos        | -Q | \
       --timeout    | -t | \
       --dummy-pkt  | -x | \
       --ping-size  | -s | \
@@ -99,6 +102,8 @@ _nanoprobe()
 --delay
 --dummy-pkt
 --duplex
+-Q
+--emulation
 -e
 --emulation
 -i
