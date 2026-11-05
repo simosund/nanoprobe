@@ -294,7 +294,7 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 }
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, bool emulation, int timeout, int busy_poll,
+    bool server, int tos, bool emulation, int timeout, int busy_poll,
     const char *log_path, bool log_pktdir)
 {
     struct nanoping_instance *ins =
@@ -310,6 +310,16 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
 
     if ((ins->nots_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("socket");
+        return NULL;
+    }
+
+    if ((res = setsockopt(ins->fd, SOL_IP, IP_TOS, &tos, sizeof(tos)) < 0)) {
+        perror("IP_TOS");
+        return NULL;
+    }
+
+    if ((res = setsockopt(ins->nots_fd, SOL_IP, IP_TOS, &tos, sizeof(tos)) < 0)) {
+        perror("IP_TOS");
         return NULL;
     }
 
