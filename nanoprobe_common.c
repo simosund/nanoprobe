@@ -308,18 +308,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         return NULL;
     }
 
-    if ((ins->nots_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("socket");
-        return NULL;
-    }
-
     if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
-                    strlen(interface)+1)) < 0) {
-        perror("SO_BINDTODEVICE");
-        return NULL;
-    }
-
-    if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
                     strlen(interface)+1)) < 0) {
         perror("SO_BINDTODEVICE");
         return NULL;
@@ -339,17 +328,6 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
             return NULL;
         }
 
-        if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeo,
-                        sizeof(timeo))) < 0) {
-            perror("SO_RCVTIMEO");
-            return NULL;
-        }
-
-        if ((res = setsockopt(ins->nots_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeo,
-                        sizeof(timeo))) < 0) {
-            perror("SO_SNDTIMEO");
-            return NULL;
-        }
     }
 
     ins->myaddr.sin_family = AF_INET;
@@ -499,56 +477,47 @@ ssize_t nanoping_send_one(struct nanoping_instance *ins,
     return siz;
 }
 
-static int send_dummies_common(struct nanoping_instance *ins, struct sockaddr_in *remaddr, int nmsg, struct iovec *iovs)
-{
-    struct mmsghdr mmsgs[nmsg];
-    int res;
-
-    memset(mmsgs, 0, sizeof(mmsgs));
-    for (int i = 0; i < nmsg; i++) {
-        mmsgs[i].msg_hdr.msg_name = remaddr;
-        mmsgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
-        mmsgs[i].msg_hdr.msg_iov = &iovs[i];
-        mmsgs[i].msg_hdr.msg_iovlen = 1;
-    }
-
-    res = sendmmsg(ins->nots_fd, mmsgs, nmsg, 0);
-    if (!res) {
-        fprintf(stderr, "zero dummy packets sent\n");
-    } else if (res < 0) {
-        perror("sendmmsg");
-    }
-    ins->pkt_transmitted += res;
-    return res;
-}
-
-static int send_dummies_msg(struct nanoping_instance *ins, struct sockaddr_in *remaddr, int nmsg)
-{
-    struct nanoping_msg msgs[nmsg];
-    struct iovec iovs[nmsg];
-
-    memset(msgs, 0, sizeof(msgs));
-    memset(iovs, 0, sizeof(iovs));
-    for (int i = 0; i < nmsg; i++) {
-        msgs[i].seq = UINT64_MAX;
-        msgs[i].type = msg_dummy;
-        iovs[i].iov_base = &msgs[i];
-        iovs[i].iov_len = sizeof(struct nanoping_msg);
-    }
-    return send_dummies_common(ins, remaddr, nmsg, iovs);
-}
-
-int nanoping_send_dummies(struct nanoping_instance *ins, struct nanoping_send_dummies_request *request)
-{
-    assert(ins && request);
-
-    return send_dummies_msg(ins, &request->remaddr, request->nmsg);
-}
-
-int nanoping_txs_one(struct nanoping_instance *ins)
+static ssize_t rcv_errorqueue_msg(int fd, struct msghdr *m, bool busyloop)
 {
     fd_set exceptfds;
-    struct sockaddr_in remaddr;
+    ssize_t siz;
+    int res;
+
+    errno = 0;
+
+    if (busyloop) {
+        while ((siz = recvmsg(fd, m, MSG_ERRQUEUE)) < 0 && errno == EAGAIN);
+    } else {
+        FD_ZERO(&exceptfds);
+        FD_SET(fd, &exceptfds);
+        if ((res = select(fd + 1, NULL, NULL, &exceptfds, NULL)) == 0) {
+            fprintf(stderr, "Timeout to receive tx timestamp\n");
+            return -1;
+        } else if (res < 0) {
+            perror("select(errqueue)");
+            return -1;
+        } else if (!FD_ISSET(fd, &exceptfds)) {
+            fprintf(stderr, "No message available on error queue\n");
+            return -1;
+        }
+
+        siz = recvmsg(fd, m, MSG_ERRQUEUE);
+    }
+
+    if (siz < 0) {
+        if (errno == EAGAIN) {
+            fprintf(stderr, "recvmsg(errqueue): Request timed out.\n");
+            return siz;
+        }
+        perror("recvmsg(errqueue)");
+        return siz;
+    }
+
+    return siz;
+}
+
+int nanoping_txs_one(struct nanoping_instance *ins, bool busyloop)
+{
     struct msghdr m = {0};
     char pktbuf[2048];
     char ctrlbuf[1024];
@@ -576,35 +545,18 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         log_pkt_tstamp(ins, etxs.seq, &etxs.stamp, etxs.type, etxs.size, true);
         return 0;
     }
-    FD_ZERO(&exceptfds);
-    FD_SET(ins->fd, &exceptfds);
-    if ((res = select(ins->fd + 1, NULL, NULL, &exceptfds, NULL)) == 0) {
-        fprintf(stderr, "Timeout to receive tx timestamp\n");
-        return -1;
-    } else if (res < 0) {
-        perror("select");
-        return res;
-    } else if (!FD_ISSET(ins->fd, &exceptfds)) {
-        fprintf(stderr, "No message available on error queue\n");
-        return -1;
-    }
 
     m.msg_iov = &iov;
     m.msg_iovlen = 1;
-    m.msg_name = (void *)&remaddr;
-    m.msg_namelen = sizeof(remaddr);
+    m.msg_name = NULL;
+    m.msg_namelen = 0;
     m.msg_control = ctrlbuf;
     m.msg_controllen = sizeof(ctrlbuf);
 
-    errno  = 0;
-    if ((siz = recvmsg(ins->fd, &m, MSG_ERRQUEUE | MSG_DONTWAIT)) < 0) {
-        if (errno == EAGAIN) {
-            fprintf(stderr, "recvmsg(errqueue): Request timed out.\n");
-            return siz;
-        }
-        perror("recvmsg(errqueue)");
+    siz = rcv_errorqueue_msg(ins->fd, &m, busyloop);
+    if (siz < 0)
         return siz;
-    }
+
     if (siz < sizeof(*msg) + TOT_LINKHDR_SIZE) {
         fprintf(stderr, "Invalid packet size on txs callback\n");
         return -1;
@@ -622,14 +574,6 @@ int nanoping_txs_one(struct nanoping_instance *ins)
     }
 
     return 0;
-}
-
-void nanoping_reset_state(struct nanoping_instance *ins)
-{
-    ins->pkt_received = 0;
-    ins->pkt_transmitted = 0;
-    ins->rxs_collected = 0;
-    ins->txs_collected = 0;
 }
 
 void nanoping_finish(struct nanoping_instance *ins)

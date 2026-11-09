@@ -53,7 +53,6 @@
 
 struct nanoping_instance {
     int fd;
-    int nots_fd;
     struct sockaddr_in myaddr;
     bool server;
     bool emulation;
@@ -77,18 +76,12 @@ enum nanoping_msg_type {
     msg_pong,
     msg_fin,
     msg_fin_ack,
-    msg_dummy,
 };
 
 struct nanoping_send_request {
     enum nanoping_msg_type type;
     uint64_t seq;
     struct sockaddr_in remaddr;
-};
-
-struct nanoping_send_dummies_request {
-    struct sockaddr_in remaddr;
-    int nmsg;
 };
 
 struct nanoping_receive_result {
@@ -117,10 +110,7 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 ssize_t nanoping_send_one(struct nanoping_instance *ins,
 			  struct nanoping_send_request *request,
 			  void *payload_buf, size_t payload_len);
-int nanoping_send_dummies(struct nanoping_instance *ins,
-    struct nanoping_send_dummies_request *request);
-int nanoping_txs_one(struct nanoping_instance *ins);
-void nanoping_reset_state(struct nanoping_instance *ins);
+int nanoping_txs_one(struct nanoping_instance *ins, bool busyloop);
 void nanoping_finish(struct nanoping_instance *ins);
 
 #endif
