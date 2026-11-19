@@ -434,6 +434,7 @@ static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
     fprintf(ins->log_stream, "%lu,t%d%s,%lu.%09lu,%lu\n", seq,
             get_tstamp_idx(msg_type, tx), pktdir, tstamp->tv_sec,
             tstamp->tv_nsec, size + TOT_NETHDR_SIZE);
+    fflush(ins->log_stream);
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
