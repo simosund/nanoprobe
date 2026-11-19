@@ -1306,7 +1306,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     dump_statistics(ins, &duration, pktsize,
                     client_opts->direction == test_forward);
 
-    close_threads(threads, ARRAY_SIZE(threads));
+    /* Is it joining the threads that cause the timeout? */
+    /* close_threads(threads, ARRAY_SIZE(threads)); */
 
     return EXIT_SUCCESS;
 }
