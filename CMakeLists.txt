@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.10)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.5)
 PROJECT(nanoprobe)
 ENABLE_LANGUAGE(C)
 
@@ -89,6 +89,14 @@ ENDIF()
 
 
 #############################################################################
+#### REQUIREMENTS                                                        ####
+#############################################################################
+
+# ====== Threads ============================================================
+FIND_PACKAGE(Threads REQUIRED)
+
+
+#############################################################################
 #### PROGRAMS                                                            ####
 #############################################################################
 
@@ -96,8 +104,9 @@ ADD_EXECUTABLE(nanoprobe
    nanoprobe_main.c
    nanoprobe_common.c
 )
-INSTALL(TARGETS     nanoprobe     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-INSTALL(FILES       nanoprobe.1   DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
-INSTALL(FILES       nanoprobe.bash-completion
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/bash-completion/completions
-        RENAME      nanoprobe)
+INSTALL(TARGETS       nanoprobe   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+TARGET_LINK_LIBRARIES(nanoprobe   "${CMAKE_THREAD_LIBS_INIT}")
+INSTALL(FILES         nanoprobe.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+INSTALL(FILES         nanoprobe.bash-completion
+        DESTINATION   ${CMAKE_INSTALL_DATADIR}/bash-completion/completions
+        RENAME        nanoprobe)

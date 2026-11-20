@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# ==========================================================================
+#              ____        _ _     _     _____           _
+#             | __ ) _   _(_) | __| |   |_   _|__   ___ | |___
+#             |  _ \| | | | | |/ _` |_____| |/ _ \ / _ \| / __|
+#             | |_) | |_| | | | (_| |_____| | (_) | (_) | \__ \
+#             |____/ \__,_|_|_|\__,_|     |_|\___/ \___/|_|___/
+#
+#                           --- Build-Tools ---
+#                https://www.nntb.no/~dreibh/system-tools/
+# ==========================================================================
+#
+# GitHub Actions Scripts
+# Copyright (C) 2018-2026 by Thomas Dreibholz
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Contact: thomas.dreibholz@gmail.com
+
+import glob
+import os
+import re
+import subprocess
+import sys
+
+if sys.version_info < (3, 9):
+   sys.stderr.write('ERROR: ' + sys.argv[0] + ' requires Python 3.9 or later!\n')
+   sys.exit(1)
+
+from typing import Final, TextIO
+
+try:
+   import distro
+except ImportError:
+   sys.stderr.write('ERROR: ' + sys.argv[0] + ' requires the Python distro package!\n')
+   sys.exit(1)
+
+
+# ###### Extract Deb file dependencies ######################################
+debDepLine : Final[re.Pattern[str]] = re.compile(r'^(.*:[ \t]*)(.*)$')
+debDepItem : Final[re.Pattern[str]] = re.compile(r'^([a-zA-Z0-9-+\.]+)[\s]*(|\|.*|\(.*)[\s]*$')
+def extractDebDependencies(line   : str,
+                           system : str) -> list[str]:
+
+   dependencies : list[str]  = []
+   distribution : Final[str] = distro.codename()
+
+   # Remove "build-depends:", etc.:
+   match : re.Match[str] | None = debDepLine.match(line)
+   if match is not None:
+      line = match.group(2)
+   line = line.strip()
+
+   # Split into segments
+   for l in line.split(','):
+      l = l.strip()
+      match= debDepItem.match(l)
+      if match is not None:
+         dependency = l
+
+         # ------ Ugly work-around for cmake --------------------------------
+         # We need cmake >= 3.0!
+         if ((match.group(1) == 'cmake') or (match.group(1) == 'cmake3')):
+            if ((system == 'debian') or (system == 'ubuntu')):
+               try:
+                  if distribution in [ 'trusty' ]:
+                     dependency = 'cmake3'
+               except:
+                  pass
+
+         dependencies.append(dependency)
+
+   return dependencies
+
+
+# ###### Extract RPM spec dependencies ######################################
+rpmDepLine : Final[re.Pattern[str]] = re.compile(r'^(.*:[ \t]*)(.*)$')
+rpmDepItem : Final[re.Pattern[str]] = re.compile(r'^([a-zA-Z0-9-+\.]+)[\s]*(|or[ \t]*.*|\(.*)[\s]*$')
+def extractRPMDependencies(line   : str,
+                           system : str) -> list[str]:
+
+   dependencies : list[str]  = []
+   distribution : Final[str] = distro.codename()
+
+   # Remove "build-depends:", etc.:
+   match : re.Match[str] | None = rpmDepLine.match(line)
+   if match is not None:
+      dependency = match.group(2).strip()
+      dependencies.append(dependency)
+
+   return dependencies
+
+
+# ###### Main program #######################################################
+
+# ====== Check arguments ====================================================
+system     : str  = ''
+runInstall : bool = False
+i = 1
+while i < len(sys.argv):
+   if sys.argv[i] == '-s' or sys.argv[i] == '--system':
+      if i + 1 < len(sys.argv):
+         system = sys.argv[i + 1]
+         i = i + 1
+      else:
+         sys.stderr.write('ERROR: Invalid system setting!\n')
+         sys.exit(1)
+   elif sys.argv[i] == '-i' or sys.argv[i] == '--install':
+      runInstall = True
+   elif sys.argv[i] == '-h' or sys.argv[i] == '--help':
+      sys.stderr.write('Usage: ' + sys.argv[0] + ' [-h|--help] [-s|--system debian|ubuntu|fedora|freebsd|auto] [-i|--install]\n')
+      sys.exit(0)
+   else:
+      sys.stderr.write('ERROR: Bad parameter ' + sys.argv[i] + '!\n')
+      sys.exit(1)
+   i = i + 1
+
+if system == '':
+   with open("/etc/os-release") as osReleaseFile:
+    osRelease = { }
+    for line in osReleaseFile:
+        key, value = line.rstrip().split("=")
+        osRelease[key] = value.strip('"')
+   system = osRelease['ID']
+
+# ====== Debian/Ubuntu ======================================================
+dependencies : list[str] = [ ]
+if ((system == 'debian') or  (system == 'ubuntu')):
+   if os.path.exists('debian/control'):
+      with open('debian/control', 'r', encoding='utf-8') as fp:
+         inside = False
+         for line in fp:
+            if not line:
+               break
+            line_lower = line.lower()
+            if inside:
+               if line.startswith((' ', "\t")):
+                  dependencies = dependencies + extractDebDependencies(line, system)
+                  continue
+               elif line.startswith('#'):
+                  continue
+               inside = False
+            if line_lower.startswith(('build-depends:', 'build-depends-indep:')):
+               dependencies = dependencies + extractDebDependencies(line, system)
+               inside = True
+
+      aptCall = [ 'apt-get', 'satisfy', '-qy' ]
+      i=0
+      for dependency in sorted(set(dependencies)):
+          if i > 0:
+             sys.stdout.write(', ')
+          sys.stdout.write(dependency)
+          aptCall.append(dependency)
+          i = i + 1
+      sys.stdout.write('\n')
+
+      if runInstall == True:
+         subprocess.call(aptCall,
+                         env = { 'DEBIAN_FRONTEND': 'noninteractive' })
+
+   else:
+      sys.stderr.write('ERROR: Unable to locate Debian control file!\n')
+      sys.exit(1)
+
+
+# ====== Fedora =============================================================
+elif system == 'fedora':
+   specFiles = glob.glob('rpm/*.spec')
+   if len(specFiles) == 1:
+      with open(specFiles[0], 'r', encoding='utf-8') as fp:
+         inside = False
+         for line in fp:
+            if not line:
+               break
+            line_lower = line.lower()
+            if inside:
+               if line.startswith('#'):
+                  continue
+               inside = False
+            if line_lower.startswith('buildrequires:'):
+               dependencies = dependencies + extractRPMDependencies(line, system)
+               inside = True
+
+      dnfCall = [ 'dnf', 'install', '-y' ]
+      i=0
+      for dependency in sorted(set(dependencies)):
+          if i > 0:
+             sys.stdout.write(', ')
+          sys.stdout.write(dependency)
+          dnfCall.append(dependency)
+          i = i + 1
+      sys.stdout.write('\n')
+
+      if runInstall == True:
+         subprocess.call(dnfCall)
+
+   else:
+      sys.stderr.write('ERROR: Unable to locate RPM spec file!\n')
+      sys.exit(1)
+
+
+# ====== FreeBSD ============================================================
+elif system == 'freebsd':
+   freeBSDMakefile = glob.glob('freebsd/*/Makefile')
+   if len(freeBSDMakefile) == 1:
+      freeBSDDirectory = os.path.dirname(freeBSDMakefile[0])
+
+      cmd = 'make build-depends-list && make run-depends-list'
+      try:
+         os.chdir(freeBSDDirectory)
+         output = subprocess.check_output(cmd, shell=True)
+      except Exception as e:
+         sys.stderr.write('ERROR: Getting FreeBSD dependencies failed: ' + str(e) + '\n')
+         sys.exit(1)
+
+      if output is not None:
+         ports = output.decode('utf-8').splitlines()
+         for port in ports:
+            if port[0:3] != '---':
+               basename = os.path.basename(port)
+               if basename == 'glib20':
+                  basename = 'glib'   # May be there is a better solution here?
+               dependencies.append(basename)
+
+      for dependency in sorted(set(dependencies)):
+          sys.stdout.write(dependency + ' ')
+      sys.stdout.write('\n')
+
+      if runInstall == True:
+         subprocess.call([ 'pkg', 'install', '-y' ] + dependencies)
+
+   else:
+      sys.stderr.write('ERROR: Unable to locate FreeBSD port makefile!\n')
+      sys.exit(1)
+
+
+# ====== Error ==============================================================
+else:
+   sys.stderr.write('ERROR: Invalid system name "' + system + '"!\n')
+   sys.exit(1)
