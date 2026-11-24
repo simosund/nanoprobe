@@ -1,0 +1,600 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rfc [
+<!ENTITY nbsp "&#160;">
+<!ENTITY zwsp "&#8203;">
+<!ENTITY nbhy "&#8209;">
+<!ENTITY wj "&#8288;">
+]>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     category="info"
+     submissionType="IETF"
+     consensus="true"
+     ipr="trust200902"
+     docName="draft-nanoprobe-protocol-00"
+     obsoletes=""
+     updates=""
+     xml:lang="en"
+     tocInclude="true"
+     symRefs="true"
+     version="3">
+ <?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+ <front>
+  <title abbrev="Nanoprobe Protocol">The Nanoprobe Protocol (NPP)</title>
+  <seriesInfo name="Internet-Draft" value="draft-nanoprobe-protocol-00" />
+  <!-- ************** THOMAS DREIBHOLZ *************** -->
+  <author initials="T." surname="Dreibholz" fullname="Thomas Dreibholz">
+   <organization abbrev="SimulaMet">Simula Metropolitan Centre for Digital Engineering</organization>
+   <address>
+    <postal>
+     <street>Stensberggata 27</street>
+     <city>0170 Oslo</city>
+     <country>Norway</country>
+    </postal>
+    <email>dreibh@simula.no</email>
+    <uri>https://www.simula.no/people/dreibh</uri>
+   </address>
+  </author>
+  <date day="24" month="November" year="2026" />
+  <area>Transport</area>
+  <workgroup>Network Working Group</workgroup>
+  <keyword>Internet-Draft</keyword>
+  <keyword>Nanoprobe</keyword>
+  <keyword>Performance Measurement</keyword>
+  <keyword>Hardware Timestamping</keyword>
+  <keyword>UDP</keyword>
+  <keyword>Latency</keyword>
+  <keyword>One-Way Delay</keyword>
+  <keyword>Round-Trip Time</keyword>
+  <abstract>
+   <t>
+    This document specifies the Nanoprobe Protocol (NPP), a lightweight,
+    high-precision network latency and packet loss measurement protocol over
+    the User Datagram Protocol (UDP). Nanoprobe is designed to minimize
+    operating system and user-space scheduling jitter by leveraging Network
+    Interface Controller (NIC) hardware transmit and receive timestamps,
+    socket busy-polling, and dedicated thread-to-core pinning. The protocol
+    supports unidirectional (forward and reverse) as well as concurrent
+    bidirectional (duplex) probing modes, configurable inter-packet pacing
+    and payload sizes, and custom per-packet probe schedules. This document
+    describes the protocol architecture, session state transitions, wire
+    packet formats, timestamp logging conventions, reference implementation,
+    and Wireshark dissector support.
+   </t>
+  </abstract>
+ </front>
+ <middle>
+  <section toc="default">
+   <name>Introduction</name>
+   <t>
+    Accurate characterization of sub-millisecond and microsecond-scale
+    network latency, delay variation (jitter), and packet loss requires a
+    probing protocol that avoids operating system kernel-to-userspace wakeup
+    latencies and protocol stack serialization overhead. Conventional network
+    diagnostic utilities such as ICMP echo tools rely primarily on software
+    timestamps captured in the kernel or user space, while multi-protocol
+    throughput benchmarking suites introduce session management complexity
+    that can perturb fine-grained latency measurements.
+   </t>
+   <t>
+    The Nanoprobe Protocol (NPP) addresses these requirements through a
+    minimalist, single-socket UDP design coupled with Linux hardware
+    timestamping (<tt>SO_TIMESTAMPING</tt>). Every UDP datagram carries a
+    fixed 16-octet header containing a 64-bit sequence number and an 8-bit
+    message type identifier, allowing both handshake control messages and
+    measurement probe packets to share a uniform framing structure on a
+    single UDP port (default port 10666).
+   </t>
+   <t>
+    Nanoprobe supports three measurement directions—forward (client-to-server),
+    reverse (server-to-client), and duplex (simultaneous bidirectional
+    probing)—as well as customizable probe schedules, selective echo ratios,
+    and clock-drift compensation.
+   </t>
+   <section toc="default">
+    <name>Terminology</name>
+    <t>This document uses the following terms:</t>
+    <ul spacing="normal">
+     <li>
+      Client: The endpoint initiating a Nanoprobe measurement session by
+      transmitting a connection request (<tt>SYN</tt>) containing test
+      configuration options to the Server.
+     </li>
+     <li>
+      Server: The endpoint listening on the configured UDP port (default
+      10666), accepting a single active Client session, negotiating test
+      parameters, and acting as either an echo responder or a probe generator
+      depending on the negotiated direction.
+     </li>
+     <li>
+      Probe Sender: The endpoint actively generating <tt>PING</tt> probe
+      packets according to a configured delay/size pair or probe schedule
+      (the Client in forward mode, the Server in reverse mode, and both
+      endpoints in duplex mode).
+     </li>
+     <li>
+      Probe Receiver: The endpoint receiving <tt>PING</tt> packets and
+      optionally returning <tt>PONG</tt> echo replies.
+     </li>
+     <li>
+      Hardware Timestamp: A nanosecond-precision timestamp captured directly
+      by the Network Interface Controller (NIC) physical layer upon frame
+      transmission or reception and retrieved via the Linux socket ancillary
+      data and error queue interfaces.
+     </li>
+     <li>
+      Probe Schedule: A comma-separated sequence of per-packet
+      (delay, packet size) tuples used in place of uniform inter-packet
+      spacing and fixed payload padding.
+     </li>
+    </ul>
+   </section>
+   <section toc="default">
+    <name>Conventions</name>
+    <t>
+     The key words "<bcp14>MUST</bcp14>", "<bcp14>MUST NOT</bcp14>",
+     "<bcp14>REQUIRED</bcp14>", "<bcp14>SHALL</bcp14>", "<bcp14>SHALL
+     NOT</bcp14>", "<bcp14>SHOULD</bcp14>", "<bcp14>SHOULD NOT</bcp14>",
+     "<bcp14>RECOMMENDED</bcp14>", "<bcp14>NOT RECOMMENDED</bcp14>",
+     "<bcp14>MAY</bcp14>", and "<bcp14>OPTIONAL</bcp14>" in this document are
+     to be interpreted as described in BCP 14 <xref target="RFC2119" />
+     <xref target="RFC8174" /> when, and only when, they appear in all
+     capitals, as shown here.
+    </t>
+   </section>
+  </section>
+  <section toc="default">
+   <name>Protocol Architecture and Overview</name>
+   <section toc="default">
+    <name>Single-Socket UDP Architecture</name>
+    <t>
+     Nanoprobe operates exclusively over the User Datagram Protocol (UDP)
+     <xref target="RFC0768" /> using a single bound UDP socket per endpoint
+     (default UDP port 10666 on the Server). All control signaling
+     (<tt>SYN</tt>, <tt>SYN-ACK</tt>, <tt>SYN-RST</tt>, <tt>FIN</tt>,
+     <tt>FIN-ACK</tt>) and measurement traffic (<tt>PING</tt>, <tt>PONG</tt>)
+     are multiplexed over this single UDP association:
+    </t>
+    <artwork name="" type="" align="left" alt=""><![CDATA[
++-----------------------+                      +-----------------------+
+|        Client         |                      |        Server         |
+|  (Ephemeral UDP Port) |                      |  (Default UDP 10666)  |
++-----------------------+                      +-----------------------+
+|  Main / Send Thread   |--- SYN (Options) --->|  Handshake / Echo /   |
+|  Receive Thread       |<-- SYN-ACK / RST ----|     Send Thread       |
+|  TX Timestamp Thread  |<== PING / PONG =====>|  TX Timestamp Thread  |
+|  (NIC HW Timestamps)  |--- FIN / FIN-ACK --->|  (NIC HW Timestamps)  |
++-----------------------+                      +-----------------------+
+    ]]></artwork>
+    <t>
+     To achieve nanosecond timestamp fidelity without blocking the packet
+     transmission path, each endpoint decouples transmit timestamp collection
+     into a dedicated TX timestamp thread that reads looped-back outgoing
+     frames and hardware timestamps from the socket's error queue
+     (<tt>MSG_ERRQUEUE</tt>). Receive hardware timestamps are delivered
+     in-band as ancillary control messages (<tt>SO_TIMESTAMPING</tt>) alongside
+     each incoming UDP datagram. An optional software emulation mode replaces
+     NIC hardware timestamps with <tt>CLOCK_REALTIME</tt> timestamps passed
+     across an internal <tt>AF_UNIX</tt> datagram socket pair.
+    </t>
+   </section>
+   <section toc="default">
+    <name>Operational Test Directions</name>
+    <t>
+     During session establishment, the Client negotiates one of three test
+     directions:
+    </t>
+    <ol spacing="normal">
+     <li>
+      Forward Mode (<tt>direction = 0</tt>): The Client acts as Probe Sender
+      and transmits <tt>PING</tt> datagrams to the Server. The Server acts as
+      Probe Receiver and echoes a <tt>PONG</tt> datagram for every
+      <tt>pong_every</tt>-th received <tt>PING</tt> (when
+      <tt>pong_every &gt; 0</tt>). When finished, the Client initiates
+      teardown with <tt>FIN</tt>.
+     </li>
+     <li>
+      Reverse Mode (<tt>direction = 1</tt>): Following completion of the
+      <tt>SYN</tt>/<tt>SYN-ACK</tt> handshake, the Client and Server swap
+      operational roles. The Client enters the echo loop while the Server
+      pauses 1 second (to allow the Client to transition to receiver mode)
+      and then acts as Probe Sender, transmitting <tt>PING</tt> datagrams
+      governed by the negotiated options (or the Server's local probe
+      schedule) and concluding with <tt>FIN</tt>/<tt>FIN-ACK</tt>.
+     </li>
+     <li>
+      Duplex Mode (<tt>direction = 2</tt>): Following the handshake, the
+      Server transitions into a dual send/receive state and waits for the
+      first <tt>PING</tt> from the Client. The Client pauses 1 second after
+      receiving <tt>SYN-ACK</tt> and begins transmitting <tt>PING</tt>
+      datagrams. Upon receiving the Client's first <tt>PING</tt>, the Server
+      simultaneously begins transmitting its own independent stream of
+      <tt>PING</tt> datagrams. In duplex mode, neither endpoint echoes
+      <tt>PONG</tt> replies nor exchanges <tt>FIN</tt>/<tt>FIN-ACK</tt>
+      packets; instead, each sender waits 1 second after completing its
+      transmission loop before closing the session.
+     </li>
+    </ol>
+   </section>
+   <section toc="default">
+    <name>Measurement Session Lifecycle</name>
+    <t>
+     A Nanoprobe measurement session progresses through three phases:
+    </t>
+    <ol spacing="normal">
+     <li>
+      Connection Establishment: The Client transmits a <tt>SYN</tt> packet
+      (<tt>seq = 0</tt>) carrying its <tt>nanoprobe_client_opts</tt>
+      structure. If no <tt>SYN-ACK</tt> is received, the Client retransmits
+      <tt>SYN</tt> after 50 ms on the first retry and every 500 ms thereafter
+      until acknowledged or timed out. Upon receiving a valid <tt>SYN</tt>,
+      the Server validates and clamps out-of-range options, binds the session
+      to the Client's source IPv4 address and UDP port, and replies with
+      <tt>SYN-ACK</tt>. While a session is active, any <tt>SYN</tt> arriving
+      from a different IPv4 address or UDP port is rejected with
+      <tt>SYN-RST</tt>, whereas duplicate <tt>SYN</tt> packets from the
+      connected peer trigger a <tt>SYN-ACK</tt> retransmission.
+     </li>
+     <li>
+      Probe Transmission and Echoing: The Probe Sender transmits
+      <tt>PING</tt> packets with monotonically increasing sequence numbers
+      starting at <tt>seq = 1</tt>. In forward and reverse modes, whenever
+      <tt>pong_every &gt; 0</tt> and <tt>seq mod pong_every == 0</tt>, the
+      Probe Receiver replies with a <tt>PONG</tt> packet echoing the
+      triggering <tt>PING</tt>'s sequence number.
+     </li>
+     <li>
+      Session Termination: In forward and reverse modes, after sending all
+      scheduled <tt>PING</tt> packets (or upon expiration of the configured
+      test duration or receipt of <tt>SIGINT</tt>), the Probe Sender transmits
+      a <tt>FIN</tt> packet carrying <tt>seq = next_seq</tt> (one greater
+      than the last <tt>PING</tt> sequence number). The Probe Sender
+      retransmits <tt>FIN</tt> (50 ms after the first attempt, 500 ms
+      thereafter) until the Probe Receiver responds with <tt>FIN-ACK</tt>
+      echoing <tt>seq</tt>.
+     </li>
+    </ol>
+   </section>
+  </section>
+  <section toc="default">
+   <name>Protocol Message Formats</name>
+   <t>
+    All Nanoprobe messages are binary-encoded and encapsulated directly inside
+    UDP datagrams. All multi-byte integer fields <bcp14>MUST</bcp14> be
+    encoded in little-endian byte order, regardless of the host CPU
+    architecture.
+   </t>
+   <section toc="default">
+    <name>Common Message Header</name>
+    <t>
+     Every Nanoprobe UDP datagram begins with a fixed 16-octet header
+     (<tt>struct nanoping_msg</tt>):
+    </t>
+    <artwork name="" type="" align="left" alt=""><![CDATA[
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                  Sequence Number (Little-E)                   +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     Type      |                                               |
++-+-+-+-+-+-+-+-+                                               +
+|                       Reserved (7 octets)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    ]]></artwork>
+    <ul spacing="normal">
+     <li>
+      Sequence Number (64 bits, unsigned integer, little-endian): Packet
+      sequence number. Set to 0 for <tt>SYN</tt>, <tt>SYN-ACK</tt>, and
+      <tt>SYN-RST</tt>; 1 through N for <tt>PING</tt>; echoed from the
+      corresponding <tt>PING</tt> for <tt>PONG</tt>; set to N + 1 for
+      <tt>FIN</tt>; and echoed from <tt>FIN</tt> for <tt>FIN-ACK</tt>.
+     </li>
+     <li>
+      <t>Type (8 bits, unsigned integer): Identifies the wire message type:</t>
+      <ul spacing="compact">
+       <li>1 (0x01): <tt>SYN</tt> (Connection Request)</li>
+       <li>2 (0x02): <tt>SYN-ACK</tt> (Connection Acknowledgment)</li>
+       <li>3 (0x03): <tt>SYN-RST</tt> (Connection Rejection)</li>
+       <li>5 (0x05): <tt>PING</tt> (Probe Request)</li>
+       <li>6 (0x06): <tt>PONG</tt> (Probe Echo Reply)</li>
+       <li>7 (0x07): <tt>FIN</tt> (Session Termination Request)</li>
+       <li>8 (0x08): <tt>FIN-ACK</tt> (Session Termination Acknowledgment)</li>
+      </ul>
+      <t>
+       Values 0 (<tt>msg_none</tt>) and 4 (<tt>msg_ping_wait</tt>) are
+       internal implementation state constants and <bcp14>MUST NOT</bcp14> be
+       transmitted on the wire.
+      </t>
+     </li>
+     <li>
+      Reserved (56 bits / 7 octets): Alignment and reserved bytes.
+      <bcp14>MUST</bcp14> be set to zero (0x00) on transmission and ignored
+      on reception.
+     </li>
+    </ul>
+   </section>
+   <section toc="default">
+    <name>SYN, SYN-ACK, and SYN-RST Messages</name>
+    <t>
+     The <tt>SYN</tt> message (Type 1) has a total UDP payload length of 44
+     octets, consisting of the 16-octet common header (<tt>seq = 0</tt>)
+     followed by a 28-octet client options structure
+     (<tt>struct nanoprobe_client_opts</tt>):
+    </t>
+    <artwork name="" type="" align="left" alt=""><![CDATA[
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                Sequence Number = 0 (Little-E)                 +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|   Type = 1    |                                               |
++-+-+-+-+-+-+-+-+                                               +
+|                       Reserved (7 octets)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Count (Little-E)                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Delay (Little-E)                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      PingPad (Little-E)       |      PongPad (Little-E)       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      PongEvery (Little-E)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      TimerType (Little-E)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      Direction (Little-E)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|CompensateDrift|              Padding (3 octets)               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    ]]></artwork>
+    <ul spacing="normal">
+     <li>
+      Count (32 bits, unsigned integer, little-endian): Test duration in
+      seconds (default 0, meaning unbounded unless interrupted or governed by
+      a probe schedule). In reverse and duplex modes without a server probe
+      schedule, the Server enforces the range [1, 3600].
+     </li>
+     <li>
+      Delay (32 bits, unsigned integer, little-endian): Inter-packet
+      transmission interval in microseconds (default 100 us). In reverse and
+      duplex modes without a server probe schedule, the Server enforces the
+      range [0, 100000000].
+     </li>
+     <li>
+      PingPad (16 bits, unsigned integer, little-endian): Number of zero-filled
+      padding octets appended after the 16-octet header in <tt>PING</tt>
+      packets (valid range [0, 2048]).
+     </li>
+     <li>
+      PongPad (16 bits, unsigned integer, little-endian): Number of zero-filled
+      padding octets appended after the 16-octet header in <tt>PONG</tt>
+      packets (valid range [0, 2048]).
+     </li>
+     <li>
+      PongEvery (32 bits, unsigned integer, little-endian): Echo reply ratio
+      (default 1). The Probe Receiver emits a <tt>PONG</tt> for every
+      N-th <tt>PING</tt> packet where <tt>seq mod PongEvery == 0</tt>. A value
+      of 0 disables <tt>PONG</tt> replies (unidirectional probe stream). Valid
+      range [0, 1000000].
+     </li>
+     <li>
+      TimerType (32 bits, unsigned integer, little-endian): Pacing timer
+      mechanism: 0 = <tt>sleep</tt> (<tt>usleep</tt>-based waiting), 1 =
+      <tt>busy</tt> (active busy-wait loop over <tt>CLOCK_MONOTONIC</tt>).
+      When unspecified by the user, <tt>busy</tt> is selected automatically
+      for <tt>Delay &lt;= 1000</tt> us and <tt>sleep</tt> otherwise.
+     </li>
+     <li>
+      Direction (32 bits, unsigned integer, little-endian): Measurement
+      direction: 0 = <tt>forward</tt>, 1 = <tt>reverse</tt>, 2 =
+      <tt>duplex</tt>.
+     </li>
+     <li>
+      CompensateDrift (8 bits, boolean): Non-zero (1) if the Probe Sender
+      compensates for scheduling overruns by preserving the nominal start
+      schedule (<tt>next_start = current_start + delay</tt>); 0 otherwise
+      (<tt>next_start = now</tt> when behind schedule).
+     </li>
+     <li>
+      Padding (24 bits / 3 octets): Trailing C structure alignment padding.
+      <bcp14>MUST</bcp14> be set to zero (0x00).
+     </li>
+    </ul>
+    <t>
+     The <tt>SYN-ACK</tt> (Type 2) and <tt>SYN-RST</tt> (Type 3) messages
+     consist solely of the 16-octet common header with <tt>seq = 0</tt> and
+     no trailing payload.
+    </t>
+   </section>
+   <section toc="default">
+    <name>PING and PONG Messages</name>
+    <t>
+     The <tt>PING</tt> (Type 5) and <tt>PONG</tt> (Type 6) messages carry the
+     16-octet common header followed by a variable-length zero-filled padding
+     payload of 0 to 2048 octets (<tt>MAX_PAD_BYTES</tt>):
+    </t>
+    <artwork name="" type="" align="left" alt=""><![CDATA[
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                  Sequence Number (Little-E)                   +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| Type (5 or 6) |                                               |
++-+-+-+-+-+-+-+-+                                               +
+|                       Reserved (7 octets)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++              Payload Padding (0 to 2048 octets)               +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    ]]></artwork>
+    <t>
+     Including the 20-octet IPv4 header and 8-octet UDP header, valid
+     <tt>PING</tt> and <tt>PONG</tt> IPv4 packet lengths span from 44 octets
+     (0 bytes padding) to 2092 octets (2048 bytes padding).
+    </t>
+   </section>
+   <section toc="default">
+    <name>FIN and FIN-ACK Messages</name>
+    <t>
+     The <tt>FIN</tt> (Type 7) and <tt>FIN-ACK</tt> (Type 8) messages consist
+     solely of the 16-octet common header with no trailing payload. In
+     <tt>FIN</tt>, the Sequence Number field carries <tt>N + 1</tt> (where N
+     is the sequence number of the final <tt>PING</tt> transmitted). In
+     <tt>FIN-ACK</tt>, the Sequence Number field echoes the value received in
+     <tt>FIN</tt>.
+    </t>
+   </section>
+  </section>
+  <section toc="default">
+   <name>Timestamping, Scheduling, and Metrics</name>
+   <section toc="default">
+    <name>Hardware Timestamp Collection and Log Format</name>
+    <t>
+     For each echoed probe exchange (<tt>seq &gt;= 1</tt>), Nanoprobe captures
+     up to four nanosecond timestamps:
+    </t>
+    <ul spacing="normal">
+     <li><tt>t0</tt>: Transmit timestamp of <tt>PING</tt> at the Probe Sender.</li>
+     <li><tt>t1</tt>: Receive timestamp of <tt>PING</tt> at the Probe Receiver.</li>
+     <li><tt>t2</tt>: Transmit timestamp of <tt>PONG</tt> at the Probe Receiver.</li>
+     <li><tt>t3</tt>: Receive timestamp of <tt>PONG</tt> at the Probe Sender.</li>
+    </ul>
+    <t>
+     When CSV logging is enabled, each collected timestamp is recorded with
+     columns <tt>seq,timestamp-idx,timestamp,size</tt>, where
+     <tt>timestamp-idx</tt> is <tt>t0</tt> through <tt>t3</tt> (appended with
+     direction tags <tt>cs</tt> for client-to-server or <tt>sc</tt> for
+     server-to-client in duplex mode), <tt>timestamp</tt> is formatted as
+     <tt>seconds.nanoseconds</tt>, and <tt>size</tt> reports the IPv4 datagram
+     length (UDP payload length plus 28 octets for IPv4 and UDP headers).
+    </t>
+    <t>
+     From these timestamps, round-trip time (RTT) excluding receiver
+     turnaround processing delay is computed as:
+    </t>
+    <artwork align="center"><![CDATA[
+RTT = (t3 - t0) - (t2 - t1)
+    ]]></artwork>
+    <t>
+     When endpoint clocks are synchronized (e.g., via IEEE 1588 Precision Time
+     Protocol or GPS), one-way delays in each direction are directly obtained
+     as:
+    </t>
+    <artwork align="center"><![CDATA[
+D_forward = t1 - t0
+D_reverse = t3 - t2
+    ]]></artwork>
+   </section>
+   <section toc="default">
+    <name>Probe Schedules</name>
+    <t>
+     In addition to uniform periodic probing, a Probe Sender can load a
+     comma-separated value (CSV) probe schedule file specifying an explicit
+     sequence of packet transmissions. Each non-empty line in the CSV file
+     defines two fields:
+    </t>
+    <artwork align="center"><![CDATA[
+<delay_us>,<packet_size_bytes>
+    ]]></artwork>
+    <t>
+     where <tt>delay_us</tt> is an unsigned 32-bit inter-packet delay in
+     microseconds (applied after transmitting the packet) and
+     <tt>packet_size_bytes</tt> is the target IPv4 packet size in octets
+     (valid range [44, 2092], from which 44 octets of IPv4, UDP, and
+     Nanoprobe headers are subtracted to determine <tt>PingPad</tt>). When a
+     probe schedule is active, the Probe Sender transmits exactly one
+     <tt>PING</tt> per schedule entry and then terminates the session.
+    </t>
+   </section>
+  </section>
+  <section toc="default">
+   <name>Reference Implementation and Dissector</name>
+   <section toc="default">
+    <name>Open Source Software Implementation</name>
+    <t>
+     The reference implementation of Nanoprobe is written in C and distributed
+     under the MIT License. It targets Linux systems supporting socket
+     hardware timestamping (<tt>SIOCSHWTSTAMP</tt> and
+     <tt>SO_TIMESTAMPING</tt>), interface binding (<tt>SO_BINDTODEVICE</tt>),
+     busy polling (<tt>SO_BUSY_POLL</tt>), and POSIX thread CPU affinity
+     pinning (<tt>pthread_setaffinity_np</tt>).
+    </t>
+    <t>
+     Git Source Repository: <eref target="https://github.com/simosund/nanoprobe" />
+    </t>
+   </section>
+   <section toc="default">
+    <name>Wireshark Protocol Dissector</name>
+    <t>
+     A Wireshark protocol dissector (<tt>packet-nanoprobe.c</tt>) decodes
+     Nanoprobe messages over UDP. It registers UDP port 10666 by default with
+     user-configurable port preferences and "Decode As" support, dissecting
+     the 16-octet common header, the 28-octet <tt>SYN</tt> client options
+     structure, and <tt>PING</tt>/<tt>PONG</tt> padding payloads in
+     little-endian byte order.
+    </t>
+    <t>
+     Git Source Repository: <eref target="https://gitlab.com/dreibh/wireshark" />,
+     branch "dreibh/nanoprobe".
+    </t>
+   </section>
+  </section>
+  <section toc="default">
+   <name>Security Considerations</name>
+   <t>
+    Nanoprobe is designed for controlled laboratory, data center, and
+    research testbed environments. It does not implement cryptographic
+    authentication, message integrity protection, or encryption.
+   </t>
+   <t>
+    In reverse and duplex modes, a single 44-octet <tt>SYN</tt> packet
+    causes the Server to transmit a stream of UDP <tt>PING</tt> packets of up
+    to 2092 octets per packet toward the source address of the <tt>SYN</tt>.
+    If exposed to untrusted networks, an attacker using a spoofed source IP
+    address could exploit a Nanoprobe server as a traffic amplification or
+    reflection source. Although the Server enforces upper bounds on duration
+    (<tt>CLIENT_MAX_COUNT = 3600</tt> seconds), delay
+    (<tt>CLIENT_MAX_DELAY = 100000000</tt> microseconds), and padding
+    (<tt>MAX_PAD_BYTES = 2048</tt> octets), and restricts active sessions to
+    a single peer at a time, Nanoprobe <bcp14>SHOULD NOT</bcp14> be exposed
+    on public Internet interfaces without network-layer access controls
+    (firewall filtering) or cryptographic encapsulation (such as IPsec or an
+    encrypted VPN tunnel).
+   </t>
+   <t>
+    Furthermore, an on-path or off-path attacker who can guess or observe the
+    active Client's source port and sequence number could inject forged
+    <tt>FIN</tt> packets to prematurely terminate an active measurement run.
+   </t>
+  </section>
+  <section toc="default">
+   <name>IANA Considerations</name>
+   <t>
+    Nanoprobe uses UDP port 10666 as its default server port, which is
+    currently unassigned in the IANA "Service Name and Transport Protocol Port
+    Number Registry" and configurable via command-line options on both Client
+    and Server. This document makes no request for IANA action.
+   </t>
+  </section>
+  <section toc="default">
+   <name>Acknowledgments</name>
+   <t>
+    The author would like to thank the contributors to the Nanoprobe
+    project and the Wireshark community for their support and feedback.
+   </t>
+  </section>
+ </middle>
+ <back>
+  <references>
+   <name>Normative References</name>
+   <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.0768.xml" />
+   <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.2119.xml" />
+   <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.8174.xml" />
+  </references>
+ </back>
+</rfc>

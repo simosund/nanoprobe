@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdbool.h>
+#include <endian.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <limits.h>
@@ -61,6 +62,13 @@ struct nanoprobe_client_opts {
     enum test_direction direction;
     bool compensate_drift;
 };
+
+_Static_assert(sizeof(enum timer_type) == sizeof(uint32_t),
+               "Unexpected size of enum timer_type");
+_Static_assert(sizeof(enum test_direction) == sizeof(uint32_t),
+               "Unexpected size of enum test_direction");
+_Static_assert(sizeof(struct nanoprobe_client_opts) == 28,
+               "Unexpected size of struct nanoprobe_client_opts - check for padding");
 
 struct nanoprobe_receive_thread_args {
     struct nanoping_instance *ins;
@@ -134,6 +142,33 @@ static uint64_t clock_gettime_ns(clockid_t clockid)
         return 0;
 
     return timespec_to_ns(&ts);
+}
+
+static void client_opts_to_le(struct nanoprobe_client_opts *dst,
+                              const struct nanoprobe_client_opts *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->count = htole32(src->count);
+    dst->delay = htole32(src->delay);
+    dst->ping_pad = htole16(src->ping_pad);
+    dst->pong_pad = htole16(src->pong_pad);
+    dst->pong_every = htole32(src->pong_every);
+    dst->ttype = (enum timer_type)htole32((uint32_t)src->ttype);
+    dst->direction = (enum test_direction)htole32((uint32_t)src->direction);
+    dst->compensate_drift = src->compensate_drift;
+}
+
+static void client_opts_from_le(struct nanoprobe_client_opts *dst,
+                                const struct nanoprobe_client_opts *src)
+{
+    dst->count = le32toh(src->count);
+    dst->delay = le32toh(src->delay);
+    dst->ping_pad = le16toh(src->ping_pad);
+    dst->pong_pad = le16toh(src->pong_pad);
+    dst->pong_every = le32toh(src->pong_every);
+    dst->ttype = (enum timer_type)le32toh((uint32_t)src->ttype);
+    dst->direction = (enum test_direction)le32toh((uint32_t)src->direction);
+    dst->compensate_drift = src->compensate_drift;
 }
 
 static const char *timertype_to_str(enum timer_type ttype)
@@ -750,11 +785,14 @@ static int setup_server_threads(struct nanoprobe_txs_thread_args *args,
 
 static int client_handshake(const struct sockaddr_in *remaddr,
                             struct nanoping_instance *ins,
-                            struct nanoprobe_client_opts *client_opts)
+                            const struct nanoprobe_client_opts *client_opts)
 {
     struct nanoping_send_request send_request = {0};
+    struct nanoprobe_client_opts wire_opts;
     bool first_time = true;
     int err;
+
+    client_opts_to_le(&wire_opts, client_opts);
 
     memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
     send_request.type = msg_syn;
@@ -762,8 +800,8 @@ static int client_handshake(const struct sockaddr_in *remaddr,
 
     atomic_store(&state, msg_syn);
     while (atomic_load(&state) == msg_syn) {
-        if ((err = nanoping_send_one(ins, &send_request, client_opts,
-                                     sizeof(*client_opts)) < 0)) {
+        if ((err = nanoping_send_one(ins, &send_request, &wire_opts,
+                                     sizeof(wire_opts)) < 0)) {
             return err;
         }
 
@@ -1066,26 +1104,30 @@ static int server_handshake(struct nanoping_instance *ins,
 {
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
-    size_t opt_len = sizeof(*client_opts);
+    struct nanoprobe_client_opts wire_opts;
+    size_t opt_len = sizeof(wire_opts);
     int res;
 
     // Wait for SYN
     while (true) {
         memset(&receive_result, 0, sizeof(receive_result));
+        opt_len = sizeof(wire_opts);
 
         nanoping_wait_for_receive(ins);
-        res = nanoping_receive_one(ins, &receive_result, client_opts, &opt_len);
+        res = nanoping_receive_one(ins, &receive_result, &wire_opts, &opt_len);
         if (res < 0)
             return res;
 
         if (receive_result.type != msg_syn)
             fprintf(stderr, "Packet of unexpected type (%d) while waiting for SYN, ignoring\n",
                     receive_result.type);
-        else if (opt_len < sizeof(*client_opts))
+        else if (opt_len < sizeof(wire_opts))
             fprintf(stderr, "Received malformed SYN packet, ignoring\n");
         else
             break;
     }
+
+    client_opts_from_le(client_opts, &wire_opts);
 
     // Send SYN-ACK
     prepare_server_reply(&send_request, &receive_result, msg_syn_ack);
