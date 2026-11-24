@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <endian.h>
 #include <netinet/in.h>
 #include <linux/udp.h>
 #include <linux/ip.h>
@@ -90,7 +91,7 @@ struct nanoping_receive_result {
     struct sockaddr_in remaddr;
 };
 
-// The actual header sent in the packet
+// The actual header sent in the packet (multi-byte fields in Little Endian)
 struct nanoping_msg {
     uint64_t seq;
     uint8_t type;

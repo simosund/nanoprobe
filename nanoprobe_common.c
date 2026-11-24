@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <stdarg.h>
+#include <endian.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
@@ -151,7 +152,7 @@ static inline ssize_t send_pkt_msg(struct nanoping_instance *ins,
                                    size_t payload_len)
 {
     static char buf[MAX_PAD_BYTES] = {0};
-    struct nanoping_msg msg = { .seq = seq, .type = type};
+    struct nanoping_msg msg = { .seq = htole64(seq), .type = type };
     struct iovec iov[2];
 
     iov[0].iov_base = &msg;
@@ -442,6 +443,7 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 {
     struct timespec stamp;
     struct nanoping_msg msg;
+    uint64_t seq;
     ssize_t siz;
 
     assert(ins && result);
@@ -453,9 +455,10 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
     if (siz < 0)
         return siz;
 
-    log_pkt_tstamp(ins, msg.seq, &stamp, msg.type, siz, false);
+    seq = le64toh(msg.seq);
+    log_pkt_tstamp(ins, seq, &stamp, msg.type, siz, false);
 
-    result->seq = msg.seq;
+    result->seq = seq;
     result->type = msg.type;
 
     return siz;
@@ -569,8 +572,8 @@ int nanoping_txs_one(struct nanoping_instance *ins, bool busyloop)
 
     if (stamp_found) {
         ins->txs_collected++;
-        log_pkt_tstamp(ins, msg->seq, &stamp, msg->type, siz - TOT_LINKHDR_SIZE,
-                       true);
+        log_pkt_tstamp(ins, le64toh(msg->seq), &stamp, msg->type,
+                       siz - TOT_LINKHDR_SIZE, true);
     }
 
     return 0;
@@ -594,4 +597,3 @@ void nanoping_finish(struct nanoping_instance *ins)
         ins->log_stream = NULL;
     }
 }
-
