@@ -294,8 +294,8 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 }
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, int tos, bool emulation, int timeout, int busy_poll,
-    const char *log_path, bool log_pktdir)
+    bool server, int tos, int rcvbuf, int sndbuf, bool emulation, int timeout,
+    int busy_poll, const char *log_path, bool log_pktdir)
 {
     struct nanoping_instance *ins =
         (struct nanoping_instance *)calloc(1, sizeof(*ins));
@@ -310,6 +310,20 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
     if ((setsockopt(ins->fd, SOL_IP, IP_TOS, &tos, sizeof(tos)) < 0)) {
         perror("IP_TOS");
         return NULL;
+    }
+
+    if (rcvbuf > 0) {
+        if (setsockopt(ins->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            perror("SO_RCVBUF");
+            return NULL;
+        }
+    }
+
+    if (sndbuf > 0) {
+        if (setsockopt(ins->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+            perror("SO_SNDBUF");
+            return NULL;
+        }
     }
 
     if ((setsockopt(ins->fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
@@ -597,4 +611,3 @@ void nanoping_finish(struct nanoping_instance *ins)
         ins->log_stream = NULL;
     }
 }
-
