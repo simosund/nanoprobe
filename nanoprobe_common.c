@@ -294,12 +294,11 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 }
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, bool emulation, int timeout, int busy_poll,
-    const char *log_path, bool log_pktdir)
+    bool server, int tos, int rcvbuf, int sndbuf, bool emulation, int timeout,
+    int busy_poll, const char *log_path, bool log_pktdir)
 {
     struct nanoping_instance *ins =
         (struct nanoping_instance *)calloc(1, sizeof(*ins));
-    int res;
 
     assert(ins);
 
@@ -308,7 +307,26 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         return NULL;
     }
 
-    if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
+    if ((setsockopt(ins->fd, SOL_IP, IP_TOS, &tos, sizeof(tos)) < 0)) {
+        perror("IP_TOS");
+        return NULL;
+    }
+
+    if (rcvbuf > 0) {
+        if (setsockopt(ins->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            perror("SO_RCVBUF");
+            return NULL;
+        }
+    }
+
+    if (sndbuf > 0) {
+        if (setsockopt(ins->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+            perror("SO_SNDBUF");
+            return NULL;
+        }
+    }
+
+    if ((setsockopt(ins->fd, SOL_SOCKET, SO_BINDTODEVICE, interface,
                     strlen(interface)+1)) < 0) {
         perror("SO_BINDTODEVICE");
         return NULL;
@@ -316,18 +334,17 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
 
     if (timeout) {
         struct timeval timeo = { timeout / 1000000, timeout % 1000000 };
-        if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeo,
+        if ((setsockopt(ins->fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeo,
                         sizeof(timeo))) < 0) {
             perror("SO_RCVTIMEO");
             return NULL;
         }
 
-        if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeo,
+        if ((setsockopt(ins->fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeo,
                         sizeof(timeo))) < 0) {
             perror("SO_SNDTIMEO");
             return NULL;
         }
-
     }
 
     ins->myaddr.sin_family = AF_INET;
@@ -358,7 +375,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
     }
 
     if (busy_poll) {
-        if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll,
+        if ((setsockopt(ins->fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll,
                         sizeof(busy_poll))) < 0) {
             perror("SO_BUSY_POLL");
             return NULL;
@@ -594,4 +611,3 @@ void nanoping_finish(struct nanoping_instance *ins)
         ins->log_stream = NULL;
     }
 }
-

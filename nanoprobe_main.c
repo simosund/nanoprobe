@@ -86,6 +86,9 @@ static struct option longopts[] = {
     {"delay",             required_argument, NULL, 'd'},
     {"port",              required_argument, NULL, 'p'},
     {"log",               required_argument, NULL, 'l'},
+    {"qos",               required_argument, NULL, 'Q'},
+    {"rcvbuf",            required_argument, NULL, 'I'},
+    {"sndbuf",            required_argument, NULL, 'O'},
     {"emulation",         no_argument,       NULL, 'e'},
     {"timeout",           required_argument, NULL, 't'},
     {"busypoll",          required_argument, NULL, 'b'},
@@ -113,8 +116,8 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --compensate-drift --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]\n");
+    fprintf(stderr, "  client: nanoprobe --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --qos [TOS] --rcvbuf [bytes] --sndbuf [bytes] --emulation --timeout [usec] --busypoll [usec] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --busyloop-txtstamp --pin-threads [x,y,z] --compensate-drift --reverse/--duplex [host]\n");
+    fprintf(stderr, "  server: nanoprobe --server --interface [nic] --port [port] --log [logfile] --qos [TOS] --rcvbuf [bytes] --sndbuf [bytes] --emulation --timeout [usec] --busypoll [usec] --probe-schedule [csv] --busyloop-txtstamp --pin-threads [x,y,z]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -1410,6 +1413,9 @@ int main(int argc, char **argv)
     char *host = NULL;
     char *port = "10666";
     char *log = NULL;
+    int tos = 0x00;   // BE
+    int rcvbuf = 0;
+    int sndbuf = 0;
     bool emulation = false;
     int timeout = 5000000;
     int busy_poll = 0;
@@ -1430,10 +1436,10 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
     } else {
-	usage();
-	return EXIT_FAILURE;
+        usage();
+        return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDS:y:BP:Ch", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:Q:I:O:et:s:o:b:T:RDS:y:BP:Ch", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1449,6 +1455,42 @@ int main(int argc, char **argv)
                 break;
             case 'l':
                 log = optarg;
+                break;
+            case 'Q':
+                {
+                    char* endptr = NULL;
+                    long  value  = strtol(optarg, &endptr, 0);
+                    if( (endptr == NULL) || (*endptr != 0x00) ||
+                        (value < 0x00)   || (value > 0xff) ) {
+                        fprintf(stderr, "Invalid TOS setting %s.\n", optarg);
+                        return EXIT_FAILURE;
+                    }
+                    tos = (int)value;
+                }
+                break;
+            case 'I':
+                {
+                    long long val = 0;
+                    err = parse_bounded_integer(&val, optarg, 0, INT_MAX);
+                    if (err) {
+                        fprintf(stderr, "Invalid receive buffer size %s: %s\n",
+                                optarg, strerror(-err));
+                        return EXIT_FAILURE;
+                    }
+                    rcvbuf = (int)val;
+                }
+                break;
+            case 'O':
+                {
+                    long long val = 0;
+                    err = parse_bounded_integer(&val, optarg, 0, INT_MAX);
+                    if (err) {
+                        fprintf(stderr, "Invalid send buffer size %s: %s\n",
+                                optarg, strerror(-err));
+                        return EXIT_FAILURE;
+                    }
+                    sndbuf = (int)val;
+                }
                 break;
             case 'e':
                 emulation = true;
@@ -1554,7 +1596,8 @@ int main(int argc, char **argv)
      }
 
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, timeout, busy_poll, log,
+                             tos, rcvbuf, sndbuf, emulation, timeout,
+                             busy_poll, log,
                              client_opts.direction == test_duplex)) == NULL) {
         return EXIT_FAILURE;
     }

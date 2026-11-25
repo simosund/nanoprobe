@@ -2,7 +2,7 @@
 .\"
 .\" MIT License
 .\"
-.\" Copyright (C) 2025 by Thomas Dreibholz <dreibh@simula.no>
+.\" Copyright (C) 2025-2026 by Thomas Dreibholz <dreibh@simula.no>
 .\"
 .\" Permission is hereby granted, free of charge, to any person obtaining a copy
 .\" of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@
 .\" SOFTWARE.
 .\"
 .\" ###### Setup ############################################################
-.Dd December 2, 2025
+.Dd November 25, 2026
 .Dt nanoprobe 1
 .Os nanoprobe
 .\" ###### Name #############################################################
@@ -33,36 +33,76 @@
 .\" ###### Synopsis #########################################################
 .Sh SYNOPSIS
 .Nm nanoprobe
-.Op Fl Fl client
+.Fl Fl client
+.br
 .Op Fl Fl interface Ar nic | Fl i Ar nic
+.br
 .Op Fl Fl count Ar sec | Fl n Ar sec
+.br
 .Op Fl Fl delay Ar usec | Fl d Ar usec
+.br
 .Op Fl Fl port Ar port | Fl p Ar port
+.br
 .Op Fl Fl log Ar logfile | Fl l Ar logfile
+.br
+.Op Fl Fl qos Ar tos | Fl Q Ar tos
+.br
+.Op Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+.br
+.Op Fl Fl sndbuf Ar bytes | Fl O Ar bytes
+.br
 .Op Fl Fl emulation | Fl e
+.br
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
+.br
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
+.br
 .Op Fl Fl timer Ar busy|sleep | Fl T Ar busy|sleep
+.br
 .Op Fl Fl ping-size Ar bytes | Fl s Ar bytes
+.br
 .Op Fl Fl pong-size Ar bytes | Fl o Ar bytes
+.br
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.br
 .Op Fl Fl pong-every Ar n | Fl y Ar n
+.br
 .Op Fl Fl busyloop-txtstamp | Fl B
+.br
 .Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
+.br
 .Op Fl Fl compensate-drift | Fl C
+.br
 .Op Fl Fl reverse | Fl R
+.br
 .Op Fl Fl duplex | Fl D
-host
+.br
+.Ar host
 .Nm nanoprobe
-.Op Fl Fl server
+.Fl Fl server
+.br
 .Op Fl Fl interface Ar nic | Fl i Ar nic
+.br
 .Op Fl Fl port Ar port | Fl p Ar port
+.br
 .Op Fl Fl log Ar logfile | Fl l Ar logfile
+.br
+.Op Fl Fl qos Ar tos | Fl Q Ar tos
+.br
+.Op Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+.br
+.Op Fl Fl sndbuf Ar bytes | Fl O Ar bytes
+.br
 .Op Fl Fl emulation | Fl e
+.br
 .Op Fl Fl timeout Ar usec | Fl t Ar usec
+.br
 .Op Fl Fl busypoll Ar usec | Fl b Ar usec
+.br
 .Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.br
 .Op Fl Fl busyloop-txtstamp | Fl B
+.br
 .Op Fl Fl pin-threads Ar x,y,z | Fl P Ar x,y,z
 .\" ###### Description ######################################################
 .Sh DESCRIPTION
@@ -91,6 +131,12 @@ The duration of the nanoprobe measurement in seconds. Set to 0 to run forever (o
 The target time in microseconds between sending ping packets.
 .It Fl Fl duplex | Fl D
 Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the "reverse" option.
+.It Fl Fl qos Ar tos | Fl Q Ar tos
+Set the IP Type of Service (TOS) to the given value. The value can be given as decimal number or hexadecimal number (with 0x prefix). Default: 0x00 (best effort).
+.It Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+Set the "SO_RCVBUF" socket receive buffer size in bytes for the ping/pong socket (see man socket(7) for details). Set to 0 to keep the system default. Default: 0.
+.It Fl Fl sndbuf Ar bytes | Fl O Ar bytes
+Set the "SO_SNDBUF" socket send buffer size in bytes for the ping/pong socket (see man socket(7) for details). Set to 0 to keep the system default. Default: 0.
 .It Fl Fl emulation | Fl e
 Use software timestamps from the nanoprobe process instead of hardware timestamps supplied by the NIC.
 .It Fl Fl interface Ar nic | Fl i Ar nic

@@ -101,8 +101,8 @@ _Static_assert(sizeof(struct nanoping_msg) == 16,
                "Unexpected size of struct nanoping_msg - check for padding");
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, bool emulation, int timeout, int busy_poll,
-    const char *log_path, bool log_pktdir);
+    bool server, int tos, int rcvbuf, int sndbuf, bool emulation, int timeout,
+    int busy_poll, const char *log_path, bool log_pktdir);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 			     struct nanoping_receive_result *result,
