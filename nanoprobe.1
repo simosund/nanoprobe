@@ -23,7 +23,7 @@
 .\" SOFTWARE.
 .\"
 .\" ###### Setup ############################################################
-.Dd November 24, 2026
+.Dd November 25, 2026
 .Dt nanoprobe 1
 .Os nanoprobe
 .\" ###### Name #############################################################
@@ -46,6 +46,10 @@
 .Op Fl Fl log Ar logfile | Fl l Ar logfile
 .br
 .Op Fl Fl qos Ar tos | Fl Q Ar tos
+.br
+.Op Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+.br
+.Op Fl Fl sndbuf Ar bytes | Fl O Ar bytes
 .br
 .Op Fl Fl emulation | Fl e
 .br
@@ -84,6 +88,10 @@
 .Op Fl Fl log Ar logfile | Fl l Ar logfile
 .br
 .Op Fl Fl qos Ar tos | Fl Q Ar tos
+.br
+.Op Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+.br
+.Op Fl Fl sndbuf Ar bytes | Fl O Ar bytes
 .br
 .Op Fl Fl emulation | Fl e
 .br
@@ -125,6 +133,10 @@ The target time in microseconds between sending ping packets.
 Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the "reverse" option.
 .It Fl Fl qos Ar tos | Fl Q Ar tos
 Set the IP Type of Service (TOS) to the given value. The value can be given as decimal number or hexadecimal number (with 0x prefix). Default: 0x00 (best effort).
+.It Fl Fl rcvbuf Ar bytes | Fl I Ar bytes
+Set the "SO_RCVBUF" socket receive buffer size in bytes for the ping/pong socket (see man socket(7) for details). Set to 0 to keep the system default. Default: 0.
+.It Fl Fl sndbuf Ar bytes | Fl O Ar bytes
+Set the "SO_SNDBUF" socket send buffer size in bytes for the ping/pong socket (see man socket(7) for details). Set to 0 to keep the system default. Default: 0.
 .It Fl Fl emulation | Fl e
 Use software timestamps from the nanoprobe process instead of hardware timestamps supplied by the NIC.
 .It Fl Fl interface Ar nic | Fl i Ar nic

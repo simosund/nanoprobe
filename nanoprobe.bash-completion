@@ -52,6 +52,8 @@ _nanoprobe()
       --delay       | -d | \
       --port        | -p | \
       --qos         | -Q | \
+      --rcvbuf      | -I | \
+      --sndbuf      | -O | \
       --timeout     | -t | \
       --ping-size   | -s | \
       --pong-size   | -o | \
@@ -107,6 +109,10 @@ _nanoprobe()
 --duplex
 -Q
 --qos
+-I
+--rcvbuf
+-O
+--sndbuf
 -e
 --emulation
 -i
